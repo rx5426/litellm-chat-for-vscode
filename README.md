@@ -44,9 +44,76 @@ When VS Code cannot surface LiteLLM models directly in the model picker, you can
 Use Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 - `LiteLLM: Open Fallback Chat` - Opens chat and prepares `@litellm` usage
+- `LiteLLM: Use 1.103 Model Picker Workaround` - Picks a LiteLLM model and opens `@litellm` chat when third-party Manage Models UI is limited
 - `LiteLLM: Select Chat Model` - Sets which LiteLLM model fallback chat should use
 - `LiteLLM: Show Available Models` - Lists models returned by your LiteLLM server
+- `LiteLLM: Set Fallback Task Goal` - Sets a persistent goal for long-running fallback workflows
+- `LiteLLM: Add Fallback Task Note` - Adds a persistent note/checkpoint for fallback workflows
+- `LiteLLM: Show Fallback Task State` - Displays current fallback goal/notes
+- `LiteLLM: Clear Fallback Task State` - Clears persistent fallback goal/notes
+- `LiteLLM: Approve Tool Call (Fallback Chat)` - Executes tool call pending approval
+- `LiteLLM: Reject Tool Call (Fallback Chat)` - Skips a tool call
+- `LiteLLM: Show Tool Call Status (Fallback Chat)` - Displays tool call history
 - `LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)` - Turns automatic code-block application on/off
+
+### Long-Workflow State In Fallback Chat
+
+Fallback chat can maintain explicit task goals and state across long workflows.
+
+Use slash commands directly in `@litellm` chat:
+
+- `/goal <text>` set persistent task goal
+- `/note <text>` add a persistent task note/checkpoint
+- `/show-state` show current goal and notes
+- `/clear-state` clear stored workflow state
+- `/help-state` show command help
+- `/loop-start <goal>` start an autonomous loop with checkpoint tracking
+- `/loop-step <instruction>` run exactly one guarded loop step
+- `/loop-approve` approve the latest checkpoint and unlock the next loop step
+- `/loop-rollback [checkpoint-id|last]` rollback state to a checkpoint
+- `/loop-status` show loop status, approval gate, and latest checkpoint summary
+
+The stored state is automatically injected into future fallback prompts (when enabled), improving continuity for multi-step work.
+
+Autonomous-loop behavior is guarded by checkpoints and approval gates by default:
+- Each `/loop-step` creates a checkpoint snapshot (goal, notes, instruction, and response summary)
+- The next `/loop-step` is blocked until `/loop-approve` (or rollback) when approval gating is enabled
+- `/loop-rollback` restores task state to a prior checkpoint for safe recovery
+
+### Tool Calling In Fallback Chat
+
+Fallback chat can request and execute tools (file operations, terminal commands, git, tests) with user approval:
+
+- Models can call tools to accomplish tasks (enabled by default when model supports tool calling)
+- Tool calls are displayed to the user with arguments before execution
+- `/tool-approve` executes the requested tool and displays output
+- `/tool-reject` skips the tool call
+- `/tool-checkpoint` creates a checkpoint capturing all executed tools for this step
+- `/tool-status` shows the history of pending, approved, executed, and failed tool calls
+
+Supported tools:
+- `read_file` - Read file content (`path` argument)
+- `write_file` - Write or create files (`path`, `content` arguments)
+- `execute_command` - Run shell commands (`command`, optional `cwd` argument)
+- `git_command` - Run git operations (`action`: status, log, diff, branch, checkout, commit, push, pull; `repo_path` argument)
+- `run_tests` - Execute tests (`test_path`, optional `framework` and `cwd` arguments)
+
+Example workflow:
+1. Ask the model to "fix failing tests"
+2. Model requests `run_tests` tool to check test status
+3. You see the tool call and run `/tool-approve`
+4. Model sees results and requests `write_file` to fix the bug
+5. Approve again to apply the fix
+6. Create a checkpoint with `/tool-checkpoint` to save progress
+
+Configuration settings for tool calling:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `litellm-vscode-chat.fallbackToolCalling.enabled` | `true` | Enable tool calling in fallback chat |
+| `litellm-vscode-chat.fallbackToolCalling.requireApprovalForExecution` | `true` | Require `/tool-approve` before executing tool calls |
+| `litellm-vscode-chat.fallbackToolCalling.maxToolCalls` | `50` | Maximum tool calls retained in workflow state |
+| `litellm-vscode-chat.fallbackToolCalling.maxOutputChars` | `4000` | Maximum characters of tool output displayed in chat |
 
 ### Code Edit Application In Fallback Chat
 
@@ -83,6 +150,13 @@ The extension automatically reads token limits from your LiteLLM server's model 
 | `litellm-vscode-chat.defaultMaxOutputTokens` | `16000` | Max tokens per response (fallback) |
 | `litellm-vscode-chat.defaultContextLength` | `128000` | Total context window (fallback) |
 | `litellm-vscode-chat.defaultMaxInputTokens` | `null` | Max input tokens (auto-calculated if null) |
+| `litellm-vscode-chat.stopSequences` | `[]` | Global fallback stop sequences (used when request/model parameters do not set `stop`) |
+| `litellm-vscode-chat.fallbackModelOptions` | `{}` | Fallback-chat-only model options (with normalized matching for routed model IDs) |
+| `litellm-vscode-chat.fallbackWorkflowState.enabled` | `true` | Enable persistent fallback goal/state injection and slash-command state controls |
+| `litellm-vscode-chat.fallbackWorkflowState.maxNotes` | `20` | Max number of persistent fallback notes to keep |
+| `litellm-vscode-chat.fallbackWorkflowState.maxCheckpoints` | `30` | Max number of autonomous-loop checkpoints to retain |
+| `litellm-vscode-chat.fallbackWorkflowState.maxCheckpointSummaryChars` | `600` | Max characters stored for each checkpoint summary |
+| `litellm-vscode-chat.fallbackWorkflowState.requireApprovalGate` | `true` | Require explicit `/loop-approve` between `/loop-step` iterations |
 
 **Priority**: LiteLLM model info → Workspace settings → Defaults
 
@@ -123,6 +197,39 @@ Override default request parameters for specific models using the `modelParamete
 **Prefix matching**: Configuration keys use longest prefix matching. For example, `"gpt-4"` will match `"gpt-4-turbo:openai"`, `"gpt-4:azure"`, etc. More specific keys take precedence.
 
 **Parameter precedence**: Runtime options > User config > Defaults
+
+### Fallback Model-Specific Options Workaround
+
+When using `@litellm`, routed model IDs can vary (for example `model:cheapest`, `model:fastest`, or `model:provider`).
+Use `litellm-vscode-chat.fallbackModelOptions` to apply runtime options specifically for fallback chat with robust matching.
+
+The fallback matcher supports normalized keys and Claude-first aliases, including:
+- `claude-code-haiku-4-5`
+- `claude-code-sonnet-4-6`
+- `claude-code-opus-4-6`
+
+Example:
+
+```json
+{
+  "litellm-vscode-chat.fallbackModelOptions": {
+    "claude-code-haiku-4-5": {
+      "max_tokens": 8192,
+      "temperature": 0.6,
+      "top_p": 0.95
+    },
+    "claude-code-sonnet-4-6": {
+      "max_tokens": 12000,
+      "temperature": 0.7
+    },
+    "claude-code-opus-4-6": {
+      "max_tokens": 16000,
+      "temperature": 0.5,
+      "stop": ["<END_OF_TASK>"]
+    }
+  }
+}
+```
 
 ### Prompt Caching (Anthropic Claude)
 

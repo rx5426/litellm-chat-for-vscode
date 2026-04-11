@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
 	},
-	"version": "0.1.26",
+	"version": "0.1.27",
 	"engines": {
 		"vscode": "^1.103.0"
 	},
@@ -90,8 +90,28 @@
 				"title": "LiteLLM: Open Fallback Chat"
 			},
 			{
+				"command": "litellm.use103ModelPickerWorkaround",
+				"title": "LiteLLM: Use 1.103 Model Picker Workaround"
+			},
+			{
 				"command": "litellm.showModels",
 				"title": "LiteLLM: Show Available Models"
+			},
+			{
+				"command": "litellm.setFallbackTaskGoal",
+				"title": "LiteLLM: Set Fallback Task Goal"
+			},
+			{
+				"command": "litellm.addFallbackTaskNote",
+				"title": "LiteLLM: Add Fallback Task Note"
+			},
+			{
+				"command": "litellm.showFallbackTaskState",
+				"title": "LiteLLM: Show Fallback Task State"
+			},
+			{
+				"command": "litellm.clearFallbackTaskState",
+				"title": "LiteLLM: Clear Fallback Task State"
 			},
 			{
 				"command": "litellm.showmodels",
@@ -100,6 +120,18 @@
 			{
 				"command": "litellm.toggleAutoApplyCodeEdits",
 				"title": "LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)"
+			},
+			{
+				"command": "litellm.approveFallbackToolCall",
+				"title": "LiteLLM: Approve Tool Call (Fallback Chat)"
+			},
+			{
+				"command": "litellm.rejectFallbackToolCall",
+				"title": "LiteLLM: Reject Tool Call (Fallback Chat)"
+			},
+			{
+				"command": "litellm.showFallbackToolStatus",
+				"title": "LiteLLM: Show Tool Call Status (Fallback Chat)"
 			}
 		],
 		"configuration": {
@@ -138,6 +170,75 @@
 					"additionalProperties": {
 						"type": "object"
 					}
+				},
+				"litellm-vscode-chat.stopSequences": {
+					"type": [
+						"array",
+						"string"
+					],
+					"default": [],
+					"description": "Global fallback stop sequences. Used when a request does not provide modelOptions.stop and modelParameters.stop. Useful for fallback chat (@litellm) where runtime stop options may be unavailable.",
+					"items": {
+						"type": "string"
+					}
+				},
+				"litellm-vscode-chat.fallbackModelOptions": {
+					"type": "object",
+					"default": {},
+					"description": "Fallback-chat-only model options for @litellm. Uses longest prefix matching with fallback model ID normalization (strips :cheapest/:fastest/provider suffixes) and Claude aliases such as claude-code-haiku-4-5, claude-code-sonnet-4-6, claude-code-opus-4-6.",
+					"additionalProperties": {
+						"type": "object"
+					}
+				},
+				"litellm-vscode-chat.fallbackWorkflowState.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable persistent fallback workflow goal/state injection for @litellm chats. Supports slash commands like /goal, /note, /show-state, and /clear-state."
+				},
+				"litellm-vscode-chat.fallbackWorkflowState.maxNotes": {
+					"type": "number",
+					"default": 20,
+					"minimum": 1,
+					"description": "Maximum number of persistent fallback workflow notes to keep. Older notes are discarded when limit is exceeded."
+				},
+				"litellm-vscode-chat.fallbackWorkflowState.maxCheckpoints": {
+					"type": "number",
+					"default": 30,
+					"minimum": 1,
+					"description": "Maximum number of fallback autonomous-loop checkpoints to retain. Older checkpoints are discarded when limit is exceeded."
+				},
+				"litellm-vscode-chat.fallbackWorkflowState.maxCheckpointSummaryChars": {
+					"type": "number",
+					"default": 600,
+					"minimum": 120,
+					"description": "Maximum characters stored per checkpoint summary for fallback autonomous loops."
+				},
+				"litellm-vscode-chat.fallbackWorkflowState.requireApprovalGate": {
+					"type": "boolean",
+					"default": true,
+					"description": "Require explicit /loop-approve between fallback autonomous loop steps."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable tool calling in fallback chat (@litellm participants)."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.requireApprovalForExecution": {
+					"type": "boolean",
+					"default": true,
+					"description": "Require explicit /tool-approve before executing tool calls from the model."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.maxToolCalls": {
+					"type": "number",
+					"default": 50,
+					"minimum": 1,
+					"description": "Maximum number of tool calls to retain in fallback workflow state."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.maxOutputChars": {
+					"type": "number",
+					"default": 4000,
+					"minimum": 500,
+					"description": "Maximum characters of tool execution output to display in chat."
 				},
 				"litellm-vscode-chat.autoApplyCodeEdits": {
 					"type": "boolean",

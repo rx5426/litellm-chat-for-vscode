@@ -1,10 +1,12 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { LiteLLMChatModelProvider } from "../provider";
+import { activate } from "../extension";
 import {
 	buildPromptWithReferences,
 	convertMessages,
 	convertTools,
+	resolveFallbackModelOptions,
 	validateRequest,
 	validateTools,
 	tryParseJSONObject,
@@ -817,6 +819,76 @@ suite("LiteLLM Chat Provider Extension", () => {
 			});
 		});
 
+		suite("stop sequences", () => {
+			test("normalizes and de-duplicates stop sequences from configuration", async () => {
+				const originalGetConfiguration = vscode.workspace.getConfiguration;
+				vscode.workspace.getConfiguration = ((section?: string) => {
+					if (section === "litellm-vscode-chat") {
+						return {
+							get: (key: string, defaultValue?: unknown) => {
+								if (key === "stopSequences") {
+									return [" END ", "", "STOP", "END", 42, " STOP "];
+								}
+								return defaultValue;
+							},
+						} as unknown as vscode.WorkspaceConfiguration;
+					}
+					return originalGetConfiguration(section);
+				}) as unknown as typeof vscode.workspace.getConfiguration;
+
+				const provider = new LiteLLMChatModelProvider(
+					{
+						get: async (key: string) => (key === "litellm.baseUrl" ? "http://test" : "test-key"),
+						store: async () => {},
+						delete: async () => {},
+						onDidChange: (_listener: unknown) => ({ dispose() {} }),
+					} as unknown as vscode.SecretStorage,
+					"GitHubCopilotChat/test VSCode/test"
+				);
+
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const stop = (provider as any).resolveStopSequences(undefined, undefined);
+
+				vscode.workspace.getConfiguration = originalGetConfiguration;
+
+				assert.deepEqual(stop, ["END", "STOP"]);
+			});
+
+			test("runtime stop takes precedence over modelParameters and global setting", async () => {
+				const provider = new LiteLLMChatModelProvider(
+					{
+						get: async (key: string) => (key === "litellm.baseUrl" ? "http://test" : "test-key"),
+						store: async () => {},
+						delete: async () => {},
+						onDidChange: (_listener: unknown) => ({ dispose() {} }),
+					} as unknown as vscode.SecretStorage,
+					"GitHubCopilotChat/test VSCode/test"
+				);
+
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const stop = (provider as any).resolveStopSequences(["RUNTIME"], ["MODEL"]);
+
+				assert.deepEqual(stop, ["RUNTIME"]);
+			});
+
+			test("falls back to modelParameters stop when runtime stop is invalid", async () => {
+				const provider = new LiteLLMChatModelProvider(
+					{
+						get: async (key: string) => (key === "litellm.baseUrl" ? "http://test" : "test-key"),
+						store: async () => {},
+						delete: async () => {},
+						onDidChange: (_listener: unknown) => ({ dispose() {} }),
+					} as unknown as vscode.SecretStorage,
+					"GitHubCopilotChat/test VSCode/test"
+				);
+
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				const stop = (provider as any).resolveStopSequences(["   ", 123], "MODEL_STOP");
+
+				assert.deepEqual(stop, ["MODEL_STOP"]);
+			});
+		});
+
 		suite("diagnostics", () => {
 			test("status callback reports successful fetch with model count", async () => {
 				const originalFetch = global.fetch;
@@ -1419,5 +1491,661 @@ suite("utils/chat references", () => {
 		assert.ok(prompt.includes("Attached file src/config.json"));
 		assert.ok(prompt.includes("src/config.json"));
 		assert.ok(prompt.includes('"enabled": true'));
+	});
+
+	test("buildPromptWithReferences rewrites inline reference mentions and restores prompt order", async () => {
+		const rawPrompt = "Compare #left and #right";
+		const leftStart = rawPrompt.indexOf("#left");
+		const rightStart = rawPrompt.indexOf("#right");
+
+		const rightReference = {
+			id: "right",
+			range: [rightStart, rightStart + "#right".length],
+			modelDescription: "Right side reference",
+			value: "right-value",
+		} as unknown as vscode.ChatPromptReference;
+
+		const leftReference = {
+			id: "left",
+			range: [leftStart, leftStart + "#left".length],
+			modelDescription: "Left side reference",
+			value: "left-value",
+		} as unknown as vscode.ChatPromptReference;
+
+		// Simulate VS Code reverse range ordering from ChatRequest.references
+		const prompt = await buildPromptWithReferences(rawPrompt, [rightReference, leftReference], {
+			resolveReferenceText: async (reference) => ({
+				label: reference.id,
+				content: `${reference.id}-content`,
+			}),
+		});
+
+		assert.ok(prompt.includes("Compare [Reference 1] and [Reference 2]"));
+		assert.ok(prompt.includes("Reference 1\nDescription: Left side reference\nSource: left"));
+		assert.ok(prompt.includes("Reference 2\nDescription: Right side reference\nSource: right"));
+	});
+
+	test("buildPromptWithReferences ignores invalid ranges and keeps prompt text", async () => {
+		const prompt = await buildPromptWithReferences(
+			"Review #broken",
+			[
+				{
+					id: "broken",
+					range: [999, 1005],
+					modelDescription: "Broken range",
+					value: "ignored",
+				} as unknown as vscode.ChatPromptReference,
+			],
+			{
+				resolveReferenceText: async () => ({ label: "broken", content: "content" }),
+			}
+		);
+
+		assert.ok(prompt.includes("Review #broken"));
+		assert.ok(prompt.includes("Reference 1"));
+	});
+});
+
+suite("utils/fallback model options", () => {
+	test("matches routed fallback model IDs by normalized prefix", () => {
+		const resolved = resolveFallbackModelOptions("claude-code-sonnet-4-6:cheapest", {
+			"claude-code-sonnet-4-6": { max_tokens: 12000, temperature: 0.7 },
+		});
+
+		assert.equal(resolved.matchedKey, "claude-code-sonnet-4-6");
+		assert.deepEqual(resolved.options, { max_tokens: 12000, temperature: 0.7 });
+	});
+
+	test("matches claude alias keys for haiku 4.5", () => {
+		const resolved = resolveFallbackModelOptions("anthropic/claude-haiku-4.5:fastest", {
+			"claude-code-haiku-4-5": { max_tokens: 8192, temperature: 0.6 },
+		});
+
+		assert.equal(resolved.matchedKey, "claude-code-haiku-4-5");
+		assert.deepEqual(resolved.options, { max_tokens: 8192, temperature: 0.6 });
+	});
+
+	test("uses longest normalized key when multiple entries match", () => {
+		const resolved = resolveFallbackModelOptions("claude-code-opus-4-6:provider-anthropic", {
+			claude: { temperature: 0.9 },
+			"claude-code-opus": { temperature: 0.7 },
+			"claude-code-opus-4-6": { temperature: 0.5, top_p: 0.9 },
+		});
+
+		assert.equal(resolved.matchedKey, "claude-code-opus-4-6");
+		assert.deepEqual(resolved.options, { temperature: 0.5, top_p: 0.9 });
+	});
+});
+
+suite("extension/fallback commands", () => {
+	const commandHandlers = new Map<string, (...args: unknown[]) => unknown>();
+	let originalRegisterCommand: typeof vscode.commands.registerCommand;
+	let originalExecuteCommand: typeof vscode.commands.executeCommand;
+	let originalShowQuickPick: typeof vscode.window.showQuickPick;
+	let originalShowInformationMessage: typeof vscode.window.showInformationMessage;
+	let originalCreateOutputChannel: typeof vscode.window.createOutputChannel;
+	let originalCreateStatusBarItem: typeof vscode.window.createStatusBarItem;
+	let originalCreateChatParticipant: typeof vscode.chat.createChatParticipant;
+	let originalGetConfiguration: typeof vscode.workspace.getConfiguration;
+	let originalPrepareLanguageModelChatInformation: LiteLLMChatModelProvider["prepareLanguageModelChatInformation"];
+	let originalProvideLanguageModelChatResponse: LiteLLMChatModelProvider["provideLanguageModelChatResponse"];
+	let originalLmRegisterLanguageModelChatProvider: unknown;
+	let originalGetExtension: typeof vscode.extensions.getExtension;
+	let fallbackParticipantHandler:
+		| ((
+				request: vscode.ChatRequest,
+				chatContext: vscode.ChatContext,
+				stream: vscode.ChatResponseStream,
+				token: vscode.CancellationToken
+		  ) => Promise<vscode.ChatResult | void>)
+		| undefined;
+	let capturedRequestMessages: readonly vscode.LanguageModelChatRequestMessage[] | undefined;
+
+	const createMockContext = (
+		store: Map<string, unknown>,
+		secretValues?: { baseUrl?: string; apiKey?: string }
+	): vscode.ExtensionContext => {
+		const defaultBaseUrl = secretValues?.baseUrl ?? "http://test";
+		const defaultApiKey = secretValues?.apiKey ?? "test-key";
+		return {
+			subscriptions: [],
+			workspaceState: {
+				get: (_key: string, defaultValue?: unknown) => defaultValue,
+				update: async (_key: string, _value: unknown) => {},
+				keys: () => [],
+			} as unknown as vscode.Memento,
+			globalState: {
+				get: <T>(key: string, defaultValue?: T) => (store.has(key) ? (store.get(key) as T) : (defaultValue as T)),
+				update: async (key: string, value: unknown) => {
+					store.set(key, value);
+				},
+				keys: () => Array.from(store.keys()),
+				setKeysForSync: (_keys: readonly string[]) => {},
+			} as unknown as vscode.Memento,
+			secrets: {
+				get: async (key: string) => {
+					if (key === "litellm.baseUrl") {
+						return defaultBaseUrl;
+					}
+					if (key === "litellm.apiKey") {
+						return defaultApiKey;
+					}
+					return undefined;
+				},
+				store: async () => {},
+				delete: async () => {},
+				onDidChange: (_listener: unknown) => ({ dispose() {} }),
+			} as unknown as vscode.SecretStorage,
+			extensionUri: vscode.Uri.file("f:/Vscode/litellm-chat-for-vscode"),
+			extensionPath: "f:/Vscode/litellm-chat-for-vscode",
+			environmentVariableCollection: {} as unknown as vscode.GlobalEnvironmentVariableCollection,
+			storageUri: undefined,
+			storagePath: undefined,
+			globalStorageUri: vscode.Uri.file("f:/Vscode/litellm-chat-for-vscode/.global-storage"),
+			globalStoragePath: "f:/Vscode/litellm-chat-for-vscode/.global-storage",
+			logUri: vscode.Uri.file("f:/Vscode/litellm-chat-for-vscode/.log"),
+			logPath: "f:/Vscode/litellm-chat-for-vscode/.log",
+			extensionMode: vscode.ExtensionMode.Test,
+			extension: {} as vscode.Extension<unknown>,
+			asAbsolutePath: (relativePath: string) => `f:/Vscode/litellm-chat-for-vscode/${relativePath}`,
+			languageModelAccessInformation: {
+				onDidChange: (_listener: unknown) => ({ dispose() {} }),
+				canSendRequest: () => true,
+			} as unknown as vscode.LanguageModelAccessInformation,
+		} as unknown as vscode.ExtensionContext;
+	};
+
+	setup(() => {
+		commandHandlers.clear();
+		fallbackParticipantHandler = undefined;
+		capturedRequestMessages = undefined;
+		originalRegisterCommand = vscode.commands.registerCommand;
+		originalExecuteCommand = vscode.commands.executeCommand;
+		originalShowQuickPick = vscode.window.showQuickPick;
+		originalShowInformationMessage = vscode.window.showInformationMessage;
+		originalCreateOutputChannel = vscode.window.createOutputChannel;
+		originalCreateStatusBarItem = vscode.window.createStatusBarItem;
+		originalCreateChatParticipant = vscode.chat.createChatParticipant;
+		originalGetConfiguration = vscode.workspace.getConfiguration;
+		originalPrepareLanguageModelChatInformation =
+			LiteLLMChatModelProvider.prototype.prepareLanguageModelChatInformation;
+		originalProvideLanguageModelChatResponse = LiteLLMChatModelProvider.prototype.provideLanguageModelChatResponse;
+		const lmApi = (vscode as unknown as { lm?: { registerLanguageModelChatProvider?: unknown } }).lm;
+		originalLmRegisterLanguageModelChatProvider = lmApi?.registerLanguageModelChatProvider;
+		originalGetExtension = vscode.extensions.getExtension;
+
+		LiteLLMChatModelProvider.prototype.prepareLanguageModelChatInformation = async function () {
+			return [
+				{
+					id: "claude-code-sonnet-4-6:cheapest",
+					name: "Claude Sonnet",
+					family: "litellm",
+					version: "1.0.0",
+					maxInputTokens: 200000,
+					maxOutputTokens: 16000,
+					capabilities: {},
+				} as unknown as vscode.LanguageModelChatInformation,
+			];
+		};
+
+		LiteLLMChatModelProvider.prototype.provideLanguageModelChatResponse = async function (
+			_model: vscode.LanguageModelChatInformation,
+			messages: readonly vscode.LanguageModelChatRequestMessage[],
+			_options: vscode.ProvideLanguageModelChatResponseOptions,
+			progress: vscode.Progress<vscode.LanguageModelResponsePart>
+		) {
+			capturedRequestMessages = messages;
+			progress.report(new vscode.LanguageModelTextPart("Step result: updated plan and generated patch."));
+			return;
+		};
+
+		vscode.commands.registerCommand = ((command: string, callback: (...args: unknown[]) => unknown) => {
+			commandHandlers.set(command, callback);
+			return { dispose() {} };
+		}) as unknown as typeof vscode.commands.registerCommand;
+
+		vscode.window.createOutputChannel = (() => ({
+			appendLine: () => {},
+			show: () => {},
+			dispose: () => {},
+		})) as unknown as typeof vscode.window.createOutputChannel;
+
+		vscode.window.createStatusBarItem = (() => ({
+			text: "",
+			tooltip: "",
+			backgroundColor: undefined,
+			command: undefined,
+			show: () => {},
+			dispose: () => {},
+		})) as unknown as typeof vscode.window.createStatusBarItem;
+
+		vscode.chat.createChatParticipant = ((_id: string, handler: unknown) => {
+			fallbackParticipantHandler = handler as typeof fallbackParticipantHandler;
+			return {
+				iconPath: undefined,
+				onDidReceiveFeedback: { dispose() {} },
+				dispose: () => {},
+			};
+		}) as unknown as typeof vscode.chat.createChatParticipant;
+
+		vscode.workspace.getConfiguration = ((section?: string) => {
+			if (section === "litellm-vscode-chat") {
+				return {
+					get: (_key: string, defaultValue?: unknown) => defaultValue,
+					update: async () => {},
+				} as unknown as vscode.WorkspaceConfiguration;
+			}
+			return originalGetConfiguration(section);
+		}) as unknown as typeof vscode.workspace.getConfiguration;
+
+		if (lmApi && typeof lmApi === "object") {
+			lmApi.registerLanguageModelChatProvider = () => ({ dispose() {} });
+		}
+
+		vscode.extensions.getExtension = (() => ({
+			packageJSON: { version: "test" },
+		})) as unknown as typeof vscode.extensions.getExtension;
+	});
+
+	teardown(() => {
+		vscode.commands.registerCommand = originalRegisterCommand;
+		vscode.commands.executeCommand = originalExecuteCommand;
+		vscode.window.showQuickPick = originalShowQuickPick;
+		vscode.window.showInformationMessage = originalShowInformationMessage;
+		vscode.window.createOutputChannel = originalCreateOutputChannel;
+		vscode.window.createStatusBarItem = originalCreateStatusBarItem;
+		vscode.chat.createChatParticipant = originalCreateChatParticipant;
+		vscode.workspace.getConfiguration = originalGetConfiguration;
+		LiteLLMChatModelProvider.prototype.prepareLanguageModelChatInformation =
+			originalPrepareLanguageModelChatInformation;
+		LiteLLMChatModelProvider.prototype.provideLanguageModelChatResponse = originalProvideLanguageModelChatResponse;
+		const lmApi = (vscode as unknown as { lm?: { registerLanguageModelChatProvider?: unknown } }).lm;
+		if (lmApi && typeof lmApi === "object") {
+			lmApi.registerLanguageModelChatProvider = originalLmRegisterLanguageModelChatProvider;
+		}
+		vscode.extensions.getExtension = originalGetExtension;
+	});
+
+	test("litellm.use103ModelPickerWorkaround selects model and opens fallback chat", async () => {
+		const executedCommands: string[] = [];
+		let quickPickCalled = 0;
+
+		vscode.window.showQuickPick = (async (items: readonly unknown[]) => {
+			quickPickCalled++;
+			return items[0] as never;
+		}) as unknown as typeof vscode.window.showQuickPick;
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("fallback chat is ready")) {
+				return "Dismiss" as never;
+			}
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			executedCommands.push(command);
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([["litellm.hasShownWelcome", true]]);
+		activate(createMockContext(state));
+
+		const workaround = commandHandlers.get("litellm.use103ModelPickerWorkaround");
+		assert.ok(workaround, "Expected workaround command to be registered");
+		await workaround?.();
+
+		assert.equal(quickPickCalled, 1);
+		assert.ok(executedCommands.includes("workbench.action.chat.open"));
+		assert.equal(state.get("litellm.selectedChatModel"), "claude-code-sonnet-4-6:cheapest");
+	});
+
+	test("litellm.openFallbackChat reuses selected model and opens chat", async () => {
+		const executedCommands: string[] = [];
+		let quickPickCalled = 0;
+
+		vscode.window.showQuickPick = (async () => {
+			quickPickCalled++;
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showQuickPick;
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("fallback chat is ready")) {
+				return "Dismiss" as never;
+			}
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			executedCommands.push(command);
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([
+			["litellm.hasShownWelcome", true],
+			["litellm.selectedChatModel", "claude-code-sonnet-4-6:cheapest"],
+		]);
+		activate(createMockContext(state));
+
+		const openFallbackChat = commandHandlers.get("litellm.openFallbackChat");
+		assert.ok(openFallbackChat, "Expected open fallback chat command to be registered");
+		await openFallbackChat?.();
+
+		assert.equal(quickPickCalled, 0, "Should not prompt when stored model is available");
+		assert.ok(executedCommands.includes("workbench.action.chat.open"));
+	});
+
+	test("1.103 workaround hint is shown only once", async () => {
+		let workaroundHintShownCount = 0;
+
+		vscode.window.showQuickPick = (async (items: readonly unknown[]) =>
+			items[0] as never) as unknown as typeof vscode.window.showQuickPick;
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("On VS Code 1.103.x")) {
+				workaroundHintShownCount++;
+				return "Dismiss" as never;
+			}
+			if (message.includes("fallback chat is ready")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([["litellm.hasShownWelcome", true]]);
+		const context = createMockContext(state);
+
+		activate(context);
+		activate(context);
+
+		assert.equal(workaroundHintShownCount, 1);
+		assert.equal(state.get("litellm.hasShown103WorkaroundHint"), true);
+	});
+
+	test("fallback workflow slash command /goal persists task goal", async () => {
+		const streamMarkdown: string[] = [];
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([["litellm.hasShownWelcome", true]]);
+		activate(createMockContext(state));
+
+		assert.ok(fallbackParticipantHandler, "Expected fallback participant handler to be captured");
+		await fallbackParticipantHandler?.(
+			{
+				prompt: "/goal Finish migration",
+				references: [],
+			} as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			{
+				markdown: (value: string) => streamMarkdown.push(String(value)),
+				progress: () => {},
+				button: () => {},
+				anchor: () => {},
+				filetree: () => {},
+				push: () => {},
+			} as unknown as vscode.ChatResponseStream,
+			new vscode.CancellationTokenSource().token
+		);
+
+		const workflowState = state.get("litellm.fallbackWorkflowState") as { goal?: string; notes?: string[] } | undefined;
+		assert.equal(workflowState?.goal, "Finish migration");
+		assert.ok(streamMarkdown.some((m) => m.includes("Saved fallback workflow goal")));
+	});
+
+	test("fallback workflow state is injected into normal fallback request prompts", async () => {
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			if (message.includes("fallback chat is ready")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([
+			["litellm.hasShownWelcome", true],
+			[
+				"litellm.fallbackWorkflowState",
+				{
+					goal: "Ship stable release",
+					notes: ["Keep changes minimal", "Run regression tests"],
+					loopEnabled: false,
+					pendingApproval: false,
+					checkpoints: [],
+					updatedAt: Date.now(),
+				},
+			],
+		]);
+		activate(createMockContext(state));
+
+		assert.ok(fallbackParticipantHandler, "Expected fallback participant handler to be captured");
+		await fallbackParticipantHandler?.(
+			{
+				prompt: "Continue implementation",
+				references: [],
+			} as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			{
+				markdown: () => {},
+				progress: () => {},
+				button: () => {},
+				anchor: () => {},
+				filetree: () => {},
+				push: () => {},
+			} as unknown as vscode.ChatResponseStream,
+			new vscode.CancellationTokenSource().token
+		);
+
+		assert.ok(capturedRequestMessages && capturedRequestMessages.length > 0);
+		const lastMessage = capturedRequestMessages?.[capturedRequestMessages.length - 1];
+		assert.ok(lastMessage, "Expected captured fallback request message");
+		const textParts = lastMessage?.content
+			.filter((part) => part instanceof vscode.LanguageModelTextPart)
+			.map((part) => (part as vscode.LanguageModelTextPart).value)
+			.join("\n");
+
+		assert.ok(textParts?.includes("Persistent workflow context:"));
+		assert.ok(textParts?.includes("Goal: Ship stable release"));
+		assert.ok(textParts?.includes("- Keep changes minimal"));
+		assert.ok(textParts?.includes("Continue implementation"));
+	});
+
+	test("loop-step creates checkpoint and enables approval gate", async () => {
+		const markdowns: string[] = [];
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([["litellm.hasShownWelcome", true]]);
+		activate(createMockContext(state));
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-start Build release", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			{
+				markdown: (value: string) => markdowns.push(value),
+				progress: () => {},
+				button: () => {},
+				anchor: () => {},
+				filetree: () => {},
+				push: () => {},
+			} as unknown as vscode.ChatResponseStream,
+			new vscode.CancellationTokenSource().token
+		);
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-step Create changelog", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			{
+				markdown: (value: string) => markdowns.push(value),
+				progress: (value: unknown) => markdowns.push(String(value ?? "")),
+				button: () => {},
+				anchor: () => {},
+				filetree: () => {},
+				push: () => {},
+			} as unknown as vscode.ChatResponseStream,
+			new vscode.CancellationTokenSource().token
+		);
+
+		const workflowState = state.get("litellm.fallbackWorkflowState") as
+			| { loopEnabled?: boolean; pendingApproval?: boolean; checkpoints?: unknown[] }
+			| undefined;
+		assert.ok(workflowState?.loopEnabled);
+		assert.equal(workflowState?.pendingApproval, true);
+		assert.ok((workflowState?.checkpoints?.length ?? 0) >= 1);
+		assert.ok(markdowns.some((value) => value.includes("Approval required before next /loop-step")));
+	});
+
+	test("approval gate blocks next loop-step until approval and rollback can restore checkpoint", async () => {
+		const markdowns: string[] = [];
+
+		vscode.window.showInformationMessage = (async (...args: unknown[]) => {
+			const message = String(args[0] ?? "");
+			if (message.includes("On VS Code 1.103.x")) {
+				return "Dismiss" as never;
+			}
+			return undefined as never;
+		}) as unknown as typeof vscode.window.showInformationMessage;
+
+		vscode.commands.executeCommand = (async (command: string, ...args: unknown[]) => {
+			const handler = commandHandlers.get(command);
+			if (handler) {
+				return await handler(...args);
+			}
+			return undefined;
+		}) as unknown as typeof vscode.commands.executeCommand;
+
+		const state = new Map<string, unknown>([["litellm.hasShownWelcome", true]]);
+		activate(createMockContext(state));
+
+		const token = new vscode.CancellationTokenSource().token;
+		const stream = {
+			markdown: (value: string) => markdowns.push(value),
+			progress: (value: unknown) => markdowns.push(String(value ?? "")),
+			button: () => {},
+			anchor: () => {},
+			filetree: () => {},
+			push: () => {},
+		} as unknown as vscode.ChatResponseStream;
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-start Ship release", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-step Step one", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+
+		const firstState = state.get("litellm.fallbackWorkflowState") as { checkpoints: Array<{ id: string }> };
+		const firstCheckpointId = firstState.checkpoints[0].id;
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-step Step two", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+
+		const blockedState = state.get("litellm.fallbackWorkflowState") as { checkpoints: unknown[] };
+		assert.equal(blockedState.checkpoints.length, 1);
+		assert.ok(markdowns.some((value) => value.includes("Approval gate is active")));
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-approve", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+
+		await fallbackParticipantHandler?.(
+			{ prompt: "/loop-step Step two", references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+
+		const secondState = state.get("litellm.fallbackWorkflowState") as { checkpoints: unknown[] };
+		assert.equal(secondState.checkpoints.length, 2);
+
+		await fallbackParticipantHandler?.(
+			{ prompt: `/loop-rollback ${firstCheckpointId}`, references: [] } as unknown as vscode.ChatRequest,
+			{ history: [] } as unknown as vscode.ChatContext,
+			stream,
+			token
+		);
+
+		const rolledBackState = state.get("litellm.fallbackWorkflowState") as {
+			checkpoints: unknown[];
+			pendingApproval: boolean;
+		};
+		assert.equal(rolledBackState.checkpoints.length, 1);
+		assert.equal(rolledBackState.pendingApproval, false);
 	});
 });

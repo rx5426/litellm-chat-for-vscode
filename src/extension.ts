@@ -1,10 +1,57 @@
 import * as vscode from "vscode";
 import { LiteLLMChatModelProvider } from "./provider";
-import { buildPromptWithReferences, extractCodeBlocks, applyCodeEdit } from "./utils";
+import {
+	buildPromptWithReferences,
+	extractCodeBlocks,
+	applyCodeEdit,
+	resolveFallbackModelOptions,
+	executeFallbackTool,
+} from "./utils";
 
 const LITELLM_VENDOR = "litellm";
 const LITELLM_CHAT_PARTICIPANT_ID = "rx5426.litellm-chat";
 const LITELLM_SELECTED_CHAT_MODEL_KEY = "litellm.selectedChatModel";
+const LITELLM_FALLBACK_WORKFLOW_STATE_KEY = "litellm.fallbackWorkflowState";
+
+interface FallbackToolCall {
+	id: string;
+	name: string; // "read_file" | "write_file" | "execute_command" | "git_command" | "run_tests"
+	arguments: Record<string, unknown>;
+	status: "pending" | "approved" | "rejected" | "executed" | "failed";
+	createdAt: number;
+	executedAt?: number;
+	result?: string;
+	error?: string;
+}
+
+interface FallbackWorkflowState {
+	goal?: string;
+	notes: string[];
+	loopEnabled: boolean;
+	pendingApproval: boolean;
+	checkpoints: FallbackWorkflowCheckpoint[];
+	toolCalls: FallbackToolCall[];
+	pendingToolCallId?: string; // The currently-pending tool call awaiting approval
+	updatedAt: number;
+}
+
+interface FallbackWorkflowCheckpoint {
+	id: string;
+	createdAt: number;
+	goal?: string;
+	notes: string[];
+	instruction: string;
+	responseSummary: string;
+	approved: boolean;
+	toolCallsIncluded?: string[]; // IDs of tool calls in this checkpoint
+}
+
+interface FallbackWorkflowCommandResult {
+	handled: boolean;
+	promptOverride?: string;
+	metadataMode?: string;
+	loopInstruction?: string;
+}
 
 /**
  * Check if the current VS Code version meets the minimum required version.
@@ -165,10 +212,583 @@ export function activate(context: vscode.ExtensionContext) {
 		await vscode.window.showInformationMessage(`LiteLLM model selected: ${picked.model.id}`);
 	};
 
+	const copyLitellmMention = async () => {
+		const choice = await vscode.window.showInformationMessage(
+			"LiteLLM fallback chat is ready. In Chat, type @litellm to send messages through LiteLLM.",
+			"Copy Mention"
+		);
+		if (choice === "Copy Mention") {
+			await vscode.env.clipboard.writeText("@litellm ");
+		}
+	};
+
+	const runModelPickerWorkaround = async () => {
+		const model = await selectLiteLLMChatModel(true, true);
+		if (!model) {
+			return;
+		}
+
+		await vscode.commands.executeCommand("workbench.action.chat.open");
+		await copyLitellmMention();
+	};
+
+	const getFallbackWorkflowState = (): FallbackWorkflowState | undefined => {
+		const raw = context.globalState.get<FallbackWorkflowState>(LITELLM_FALLBACK_WORKFLOW_STATE_KEY);
+		if (!raw) {
+			return undefined;
+		}
+		return {
+			goal: raw.goal?.trim() || undefined,
+			notes: Array.isArray(raw.notes) ? raw.notes.filter((n) => typeof n === "string" && n.trim().length > 0) : [],
+			loopEnabled: raw.loopEnabled === true,
+			pendingApproval: raw.pendingApproval === true,
+			checkpoints: Array.isArray(raw.checkpoints)
+				? raw.checkpoints
+						.filter(
+							(checkpoint) =>
+								typeof checkpoint?.id === "string" &&
+								Array.isArray(checkpoint?.notes) &&
+								typeof checkpoint?.instruction === "string"
+						)
+						.map((checkpoint) => ({
+							id: checkpoint.id,
+							createdAt: typeof checkpoint.createdAt === "number" ? checkpoint.createdAt : Date.now(),
+							goal: checkpoint.goal?.trim() || undefined,
+							notes: checkpoint.notes.filter((n) => typeof n === "string" && n.trim().length > 0),
+							instruction: checkpoint.instruction,
+							responseSummary:
+								typeof checkpoint.responseSummary === "string" ? checkpoint.responseSummary : "(no summary)",
+							approved: checkpoint.approved === true,
+							toolCallsIncluded: Array.isArray((checkpoint as unknown as Record<string, unknown>).toolCallsIncluded)
+								? ((checkpoint as unknown as Record<string, unknown>).toolCallsIncluded as string[])
+								: undefined,
+						}))
+				: [],
+			toolCalls: Array.isArray((raw as unknown as Record<string, unknown>).toolCalls)
+				? ((raw as unknown as Record<string, unknown>).toolCalls as FallbackToolCall[])
+						.filter((tc) => typeof tc?.id === "string" && typeof tc?.name === "string")
+						.map((tc) => ({
+							id: tc.id,
+							name: tc.name,
+							arguments: typeof tc.arguments === "object" ? tc.arguments : {},
+							status: (["pending", "approved", "rejected", "executed", "failed"] as const).includes(
+								tc.status as FallbackToolCall["status"]
+							)
+								? (tc.status as FallbackToolCall["status"])
+								: "pending",
+							createdAt: typeof tc.createdAt === "number" ? tc.createdAt : Date.now(),
+							executedAt: typeof tc.executedAt === "number" ? tc.executedAt : undefined,
+							result: typeof tc.result === "string" ? tc.result : undefined,
+							error: typeof tc.error === "string" ? tc.error : undefined,
+						}))
+				: [],
+			pendingToolCallId:
+				typeof (raw as unknown as Record<string, unknown>).pendingToolCallId === "string"
+					? ((raw as unknown as Record<string, unknown>).pendingToolCallId as string)
+					: undefined,
+			updatedAt: typeof raw.updatedAt === "number" ? raw.updatedAt : Date.now(),
+		};
+	};
+
+	const saveFallbackWorkflowState = async (state: FallbackWorkflowState): Promise<void> => {
+		const config = vscode.workspace.getConfiguration("litellm-vscode-chat");
+		const maxNotes = Math.max(1, config.get<number>("fallbackWorkflowState.maxNotes", 20));
+		const maxCheckpoints = Math.max(1, config.get<number>("fallbackWorkflowState.maxCheckpoints", 30));
+		const maxToolCalls = Math.max(1, config.get<number>("fallbackWorkflowState.maxToolCalls", 50));
+		const normalized: FallbackWorkflowState = {
+			goal: state.goal?.trim() || undefined,
+			notes: state.notes
+				.map((n) => n.trim())
+				.filter((n) => n.length > 0)
+				.slice(-maxNotes),
+			loopEnabled: state.loopEnabled === true,
+			pendingApproval: state.pendingApproval === true,
+			checkpoints: (state.checkpoints ?? []).slice(-maxCheckpoints),
+			toolCalls: (state.toolCalls ?? []).slice(-maxToolCalls),
+			pendingToolCallId: state.pendingToolCallId,
+			updatedAt: Date.now(),
+		};
+		await context.globalState.update(LITELLM_FALLBACK_WORKFLOW_STATE_KEY, normalized);
+	};
+
+	const clearFallbackWorkflowState = async (): Promise<void> => {
+		await context.globalState.update(LITELLM_FALLBACK_WORKFLOW_STATE_KEY, undefined);
+	};
+
+	const formatFallbackWorkflowState = (state?: FallbackWorkflowState): string => {
+		if (!state || (!state.goal && state.notes.length === 0 && state.checkpoints.length === 0)) {
+			return "No fallback workflow goal/state stored.";
+		}
+
+		const lines: string[] = ["Fallback workflow state:"];
+		if (state.goal) {
+			lines.push(`Goal: ${state.goal}`);
+		}
+		lines.push(`Loop: ${state.loopEnabled ? "enabled" : "disabled"}`);
+		if (state.loopEnabled) {
+			lines.push(`Approval gate: ${state.pendingApproval ? "waiting for approval" : "ready"}`);
+		}
+		if (state.notes.length > 0) {
+			lines.push("Notes:");
+			for (const [index, note] of state.notes.entries()) {
+				lines.push(`${index + 1}. ${note}`);
+			}
+		}
+		if (state.checkpoints.length > 0) {
+			const latest = state.checkpoints[state.checkpoints.length - 1];
+			lines.push(`Checkpoints: ${state.checkpoints.length} (latest: ${latest.id})`);
+			lines.push(`Latest summary: ${latest.responseSummary}`);
+		}
+		lines.push(`Updated: ${new Date(state.updatedAt).toLocaleString()}`);
+		return lines.join("\n");
+	};
+
+	const createCheckpointId = (): string => `cp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+	const toResponseSummary = (text: string): string => {
+		const config = vscode.workspace.getConfiguration("litellm-vscode-chat");
+		const maxChars = Math.max(120, config.get<number>("fallbackWorkflowState.maxCheckpointSummaryChars", 600));
+		const normalized = text.replace(/\s+/g, " ").trim();
+		if (!normalized) {
+			return "(no response text)";
+		}
+		if (normalized.length <= maxChars) {
+			return normalized;
+		}
+		return `${normalized.slice(0, maxChars - 14)}... [truncated]`;
+	};
+
+	const buildWorkflowContextPrefix = (): string | undefined => {
+		const config = vscode.workspace.getConfiguration("litellm-vscode-chat");
+		const enabled = config.get<boolean>("fallbackWorkflowState.enabled", true);
+		if (!enabled) {
+			return undefined;
+		}
+
+		const state = getFallbackWorkflowState();
+		if (!state || (!state.goal && state.notes.length === 0)) {
+			return undefined;
+		}
+
+		const lines: string[] = [
+			"Persistent workflow context:",
+			"Use this as task state for long-running multi-step work unless the user overrides it.",
+		];
+		if (state.goal) {
+			lines.push(`Goal: ${state.goal}`);
+		}
+		if (state.notes.length > 0) {
+			lines.push("State notes:");
+			for (const note of state.notes) {
+				lines.push(`- ${note}`);
+			}
+		}
+		return lines.join("\n");
+	};
+
+	const withWorkflowContext = (prompt: string): string => {
+		const workflowContext = buildWorkflowContextPrefix();
+		if (!workflowContext) {
+			return prompt;
+		}
+		const trimmedPrompt = prompt.trim();
+		if (!trimmedPrompt) {
+			return workflowContext;
+		}
+		return `${workflowContext}\n\n${trimmedPrompt}`;
+	};
+
+	const createToolCallId = (): string => `tc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+	const addToolCall = async (toolCall: FallbackToolCall): Promise<void> => {
+		const state = getFallbackWorkflowState() ?? {
+			notes: [],
+			loopEnabled: false,
+			pendingApproval: false,
+			checkpoints: [],
+			toolCalls: [],
+			updatedAt: Date.now(),
+		};
+		await saveFallbackWorkflowState({
+			...state,
+			toolCalls: [...(state.toolCalls ?? []), toolCall],
+			pendingToolCallId: toolCall.id,
+		});
+	};
+
+	const updateToolCall = async (toolCallId: string, updates: Partial<FallbackToolCall>): Promise<void> => {
+		const state = getFallbackWorkflowState();
+		if (!state || !state.toolCalls) {
+			return;
+		}
+		const updated = state.toolCalls.map((tc) => (tc.id === toolCallId ? { ...tc, ...updates } : tc));
+		await saveFallbackWorkflowState({
+			...state,
+			toolCalls: updated,
+			pendingToolCallId: updates.status === "rejected" ? undefined : state.pendingToolCallId,
+		});
+	};
+
+	const getPendingToolCall = (): FallbackToolCall | undefined => {
+		const state = getFallbackWorkflowState();
+		if (!state || !state.pendingToolCallId) {
+			return undefined;
+		}
+		return state.toolCalls.find((tc) => tc.id === state.pendingToolCallId);
+	};
+
+	const handleFallbackWorkflowCommand = async (
+		prompt: string,
+		stream: vscode.ChatResponseStream
+	): Promise<FallbackWorkflowCommandResult> => {
+		const trimmed = prompt.trim();
+		if (!trimmed.startsWith("/")) {
+			return { handled: false };
+		}
+
+		const emptyState: FallbackWorkflowState = {
+			notes: [],
+			loopEnabled: false,
+			pendingApproval: false,
+			checkpoints: [],
+			toolCalls: [],
+			updatedAt: Date.now(),
+		};
+
+		if (trimmed.startsWith("/goal ")) {
+			const goal = trimmed.slice("/goal ".length).trim();
+			if (!goal) {
+				stream.markdown("Provide a goal after `/goal`, for example `/goal Finish API migration`.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+			const existing = getFallbackWorkflowState() ?? emptyState;
+			await saveFallbackWorkflowState({ ...existing, goal });
+			stream.markdown(`Saved fallback workflow goal:\n\n${goal}`);
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed.startsWith("/note ")) {
+			const note = trimmed.slice("/note ".length).trim();
+			if (!note) {
+				stream.markdown("Provide a note after `/note`, for example `/note Endpoint schema validated`.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+			const existing = getFallbackWorkflowState() ?? emptyState;
+			await saveFallbackWorkflowState({
+				...existing,
+				notes: [...existing.notes, note],
+			});
+			stream.markdown(`Added workflow note:\n\n${note}`);
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed.startsWith("/loop-start ")) {
+			const goal = trimmed.slice("/loop-start ".length).trim();
+			if (!goal) {
+				stream.markdown("Provide a goal after `/loop-start`, for example `/loop-start Ship release candidate`.");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			await saveFallbackWorkflowState({
+				goal,
+				notes: [],
+				loopEnabled: true,
+				pendingApproval: false,
+				checkpoints: [],
+				toolCalls: [],
+				updatedAt: Date.now(),
+			});
+			stream.markdown(
+				`Autonomous loop started.\n\nGoal: ${goal}\n\nNext: run /loop-step <instruction> to execute one guarded step.`
+			);
+			return { handled: true, metadataMode: "fallback-loop-command" };
+		}
+
+		if (trimmed === "/loop-status") {
+			const state = getFallbackWorkflowState();
+			if (!state?.loopEnabled) {
+				stream.markdown("Autonomous loop is not enabled. Start with `/loop-start <goal>`. ");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			stream.markdown(formatFallbackWorkflowState(state));
+			return { handled: true, metadataMode: "fallback-loop-command" };
+		}
+
+		if (trimmed === "/loop-approve") {
+			const state = getFallbackWorkflowState();
+			if (!state?.loopEnabled) {
+				stream.markdown("Autonomous loop is not enabled.");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			if (!state.pendingApproval) {
+				stream.markdown("No pending checkpoint approval. Run /loop-step to create a new checkpoint.");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			if (state.checkpoints.length > 0) {
+				state.checkpoints[state.checkpoints.length - 1].approved = true;
+			}
+			await saveFallbackWorkflowState({
+				...state,
+				pendingApproval: false,
+				notes: [
+					...state.notes,
+					`Approved checkpoint ${state.checkpoints[state.checkpoints.length - 1]?.id ?? "latest"}`,
+				],
+			});
+			stream.markdown("Checkpoint approved. You can run the next step with `/loop-step <instruction>`. ");
+			return { handled: true, metadataMode: "fallback-loop-command" };
+		}
+
+		if (trimmed.startsWith("/loop-rollback")) {
+			const state = getFallbackWorkflowState();
+			if (!state?.loopEnabled || state.checkpoints.length === 0) {
+				stream.markdown("No checkpoints available to rollback.");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			const rawTarget = trimmed.replace("/loop-rollback", "").trim();
+			let target = state.checkpoints[state.checkpoints.length - 1];
+			if (rawTarget && rawTarget !== "last") {
+				const found = state.checkpoints.find((checkpoint) => checkpoint.id === rawTarget);
+				if (!found) {
+					stream.markdown(`Checkpoint '${rawTarget}' not found.`);
+					return { handled: true, metadataMode: "fallback-loop-command" };
+				}
+				target = found;
+			}
+			const targetIndex = state.checkpoints.findIndex((checkpoint) => checkpoint.id === target.id);
+			await saveFallbackWorkflowState({
+				goal: target.goal,
+				notes: [...target.notes, `Rolled back to ${target.id}`],
+				loopEnabled: true,
+				pendingApproval: false,
+				checkpoints: state.checkpoints.slice(0, targetIndex + 1),
+				toolCalls: state.toolCalls,
+				updatedAt: Date.now(),
+			});
+			stream.markdown(`Rolled back to checkpoint ${target.id}. Approval gate reset.`);
+			return { handled: true, metadataMode: "fallback-loop-command" };
+		}
+
+		if (trimmed.startsWith("/loop-step")) {
+			const state = getFallbackWorkflowState();
+			if (!state?.loopEnabled) {
+				stream.markdown("Autonomous loop is not enabled. Start with `/loop-start <goal>`. ");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			if (state.pendingApproval) {
+				stream.markdown(
+					"Approval gate is active. Run `/loop-approve` to continue or `/loop-rollback [checkpoint-id|last]` to revert."
+				);
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			if (!state.goal) {
+				stream.markdown("Loop goal is missing. Set one with `/loop-start <goal>` or `/goal <goal>`. ");
+				return { handled: true, metadataMode: "fallback-loop-command" };
+			}
+			const explicitInstruction = trimmed.replace("/loop-step", "").trim();
+			const instruction = explicitInstruction || "Continue with the next safe, concrete step toward the goal.";
+			const checkpointPreview = state.checkpoints
+				.slice(-3)
+				.map((checkpoint) => `- ${checkpoint.id}: ${checkpoint.responseSummary}`)
+				.join("\n");
+			const overridePrompt = [
+				`Loop goal: ${state.goal}`,
+				"Loop mode: execute exactly one step, then provide a concise checkpoint summary and ask for approval.",
+				state.notes.length > 0 ? `State notes:\n${state.notes.map((n) => `- ${n}`).join("\n")}` : undefined,
+				checkpointPreview ? `Recent checkpoints:\n${checkpointPreview}` : undefined,
+				`Current step instruction: ${instruction}`,
+			]
+				.filter((line): line is string => Boolean(line))
+				.join("\n\n");
+			return {
+				handled: false,
+				promptOverride: overridePrompt,
+				loopInstruction: instruction,
+			};
+		}
+
+		if (trimmed === "/show-state") {
+			stream.markdown(formatFallbackWorkflowState(getFallbackWorkflowState()));
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed === "/clear-state") {
+			await clearFallbackWorkflowState();
+			stream.markdown("Cleared fallback workflow state.");
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		// Tool call commands
+		if (trimmed === "/tool-approve") {
+			const pending = getPendingToolCall();
+			if (!pending) {
+				stream.markdown("No pending tool call to approve.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			stream.progress(`Executing tool: ${pending.name}...`);
+
+			try {
+				const result = await executeFallbackTool(pending.name, pending.arguments);
+				const executedAt = Date.now();
+
+				if (result.success) {
+					await updateToolCall(pending.id, {
+						status: "executed",
+						executedAt,
+						result: result.output,
+					});
+
+					stream.markdown(
+						`\n✓ **Tool executed successfully**: \`${pending.name}\`\n\n**Output:**\n\`\`\`\n${result.output.slice(0, 2000)}\n\`\`\``
+					);
+
+					// Clear pending flag so next tool call can be made
+					const state = getFallbackWorkflowState();
+					if (state) {
+						await saveFallbackWorkflowState({
+							...state,
+							pendingToolCallId: undefined,
+						});
+					}
+				} else {
+					await updateToolCall(pending.id, {
+						status: "failed",
+						executedAt,
+						error: result.error,
+					});
+
+					stream.markdown(`\n✗ **Tool execution failed**: \`${pending.name}\`\n\nError: \`${result.error}\``);
+				}
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				await updateToolCall(pending.id, {
+					status: "failed",
+					executedAt: Date.now(),
+					error: errorMsg,
+				});
+
+				stream.markdown(`\n✗ **Unexpected error**: ${errorMsg}`);
+			}
+
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed === "/tool-reject") {
+			const pending = getPendingToolCall();
+			if (!pending) {
+				stream.markdown("No pending tool call to reject.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+			await updateToolCall(pending.id, { status: "rejected" });
+
+			// Clear pending flag
+			const state = getFallbackWorkflowState();
+			if (state) {
+				await saveFallbackWorkflowState({
+					...state,
+					pendingToolCallId: undefined,
+				});
+			}
+
+			stream.markdown(`✗ Tool call rejected: \`${pending.name}\``);
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed === "/tool-checkpoint") {
+			const state = getFallbackWorkflowState();
+			if (!state) {
+				stream.markdown("No workflow state. Start with `/goal` or `/loop-start` first.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			const toolCallsInCheckpoint = state.toolCalls.filter((tc) => tc.status === "executed").map((tc) => tc.id);
+
+			const newCheckpoint: FallbackWorkflowCheckpoint = {
+				id: createCheckpointId(),
+				createdAt: Date.now(),
+				goal: state.goal,
+				notes: [...state.notes],
+				instruction: `Tool checkpoint (${toolCallsInCheckpoint.length} executed tools)`,
+				responseSummary: `Captured ${toolCallsInCheckpoint.length} tool execution${toolCallsInCheckpoint.length === 1 ? "" : "s"}`,
+				approved: false,
+				toolCallsIncluded: toolCallsInCheckpoint,
+			};
+
+			await saveFallbackWorkflowState({
+				...state,
+				checkpoints: [...state.checkpoints, newCheckpoint],
+				notes: [...state.notes, `Tool checkpoint ${newCheckpoint.id}: ${newCheckpoint.responseSummary}`],
+			});
+
+			stream.markdown(
+				`✓ Tool checkpoint created: \`${newCheckpoint.id}\` with ${toolCallsInCheckpoint.length} tool calls`
+			);
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed === "/tool-status") {
+			const state = getFallbackWorkflowState();
+			if (!state || !state.toolCalls || state.toolCalls.length === 0) {
+				stream.markdown("No tool calls in workflow state.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			const lines: string[] = ["Tool call status:"];
+			const groupedByStatus = state.toolCalls.reduce(
+				(acc, tc) => {
+					const group = acc[tc.status] || [];
+					group.push(tc);
+					acc[tc.status] = group;
+					return acc;
+				},
+				{} as Record<string, FallbackToolCall[]>
+			);
+
+			for (const status of ["pending", "approved", "executed", "rejected", "failed"] as const) {
+				const calls = groupedByStatus[status] || [];
+				if (calls.length > 0) {
+					lines.push(`\n**${status}** (${calls.length}):`);
+					for (const tc of calls) {
+						lines.push(`- ${tc.name}: ${tc.error || tc.result || "(no output yet)"}`.slice(0, 100));
+					}
+				}
+			}
+
+			stream.markdown(lines.join("\n"));
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		if (trimmed === "/help-state") {
+			stream.markdown(
+				"Fallback workflow commands:\n- `/goal <text>` set persistent goal\n- `/note <text>` add persistent note\n- `/show-state` show current goal/notes\n- `/clear-state` clear goal/notes\n- `/loop-start <goal>` start guarded autonomous loop\n- `/loop-step <instruction>` run one loop step\n- `/loop-approve` approve latest checkpoint\n- `/loop-rollback [checkpoint-id|last]` rollback loop state\n- `/loop-status` show loop status\n\nTool call commands:\n- `/tool-approve` approve pending tool call\n- `/tool-reject` reject pending tool call\n- `/tool-checkpoint` create checkpoint for executed tools\n- `/tool-status` show tool call statuses"
+			);
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
+		return { handled: false };
+	};
+
+	const buildCodeBlockFingerprint = (block: { language: string; code: string }): string => {
+		const normalizedLanguage = block.language.trim().toLowerCase();
+		const normalizedCode = block.code.replace(/\r\n/g, "\n").trim();
+		return `${normalizedLanguage}::${normalizedCode}`;
+	};
+
 	const fallbackParticipant = vscode.chat.createChatParticipant(
 		LITELLM_CHAT_PARTICIPANT_ID,
 		async (request, chatContext, stream, token) => {
 			try {
+				const workflowCommand = await handleFallbackWorkflowCommand(request.prompt, stream);
+				if (workflowCommand.handled && !workflowCommand.promptOverride) {
+					return {
+						metadata: {
+							mode: workflowCommand.metadataMode ?? "fallback-workflow-command",
+						},
+					};
+				}
+
+				const effectivePrompt = workflowCommand.promptOverride ?? request.prompt;
+
 				stream.progress("Resolving LiteLLM model...");
 				const selectedModel = await selectLiteLLMChatModel(true);
 				if (!selectedModel) {
@@ -184,7 +804,9 @@ export function activate(context: vscode.ExtensionContext) {
 				for (const turn of chatContext.history) {
 					if (turn instanceof vscode.ChatRequestTurn) {
 						messages.push(
-							vscode.LanguageModelChatMessage.User(await buildPromptWithReferences(turn.prompt, turn.references))
+							vscode.LanguageModelChatMessage.User(
+								withWorkflowContext(await buildPromptWithReferences(turn.prompt, turn.references))
+							)
 						);
 					} else if (turn instanceof vscode.ChatResponseTurn) {
 						const text = turn.response
@@ -197,8 +819,20 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 				}
 				messages.push(
-					vscode.LanguageModelChatMessage.User(await buildPromptWithReferences(request.prompt, request.references))
+					vscode.LanguageModelChatMessage.User(
+						withWorkflowContext(await buildPromptWithReferences(effectivePrompt, request.references))
+					)
 				);
+
+				const fallbackModelOptionsConfig = vscode.workspace
+					.getConfiguration("litellm-vscode-chat")
+					.get<Record<string, Record<string, unknown>>>("fallbackModelOptions", {});
+				const resolvedFallbackOptions = resolveFallbackModelOptions(selectedModel.id, fallbackModelOptionsConfig);
+				if (resolvedFallbackOptions.matchedKey) {
+					outputChannel.appendLine(
+						`[${new Date().toISOString()}] Fallback model options matched '${resolvedFallbackOptions.matchedKey}' for ${selectedModel.id}`
+					);
+				}
 
 				// Check if automatic code edits are enabled
 				const autoApplyEdits = vscode.workspace
@@ -207,21 +841,37 @@ export function activate(context: vscode.ExtensionContext) {
 
 				// Track applied edits for notification
 				let appliedEditsCount = 0;
+				let streamedTextBuffer = "";
+				const emittedCodeBlocks = new Set<string>();
+				let pendingToolCall: FallbackToolCall | undefined;
 
 				await provider.provideLanguageModelChatResponse(
 					selectedModel,
 					messages,
-					{ toolMode: vscode.LanguageModelChatToolMode.Auto },
+					{
+						toolMode: vscode.LanguageModelChatToolMode.Auto,
+						modelOptions: resolvedFallbackOptions.options,
+					},
 					{
 						report: (part) => {
 							if (part instanceof vscode.LanguageModelTextPart) {
 								const text = part.value;
 								stream.markdown(text);
+								streamedTextBuffer += text;
 
-								// Extract and offer code blocks for application
-								const blocks = extractCodeBlocks(text);
+								// Parse accumulated content so fenced blocks split across streaming chunks are detected.
+								const detectedBlocks = extractCodeBlocks(streamedTextBuffer);
+								const blocks = detectedBlocks.filter((block) => {
+									const fingerprint = buildCodeBlockFingerprint(block);
+									if (emittedCodeBlocks.has(fingerprint)) {
+										return false;
+									}
+									emittedCodeBlocks.add(fingerprint);
+									return true;
+								});
+
 								if (blocks.length > 0 && autoApplyEdits) {
-									stream.progress(`Auto-applying ${blocks.length} code block${blocks.length > 1 ? "s" : ""}...`);
+									stream.progress(`Auto-applying ${blocks.length} new code block${blocks.length > 1 ? "s" : ""}...`);
 								}
 
 								for (const block of blocks) {
@@ -251,17 +901,86 @@ export function activate(context: vscode.ExtensionContext) {
 									}
 								}
 							} else if (part instanceof vscode.LanguageModelToolCallPart) {
-								stream.progress(`Tool request emitted by ${selectedModel.id}: ${part.name}`);
+								// Capture tool call from model
+								pendingToolCall = {
+									id: createToolCallId(),
+									name: part.name,
+									arguments: (typeof part.input === "object" && part.input !== null ? part.input : {}) as Record<
+										string,
+										unknown
+									>,
+									status: "pending",
+									createdAt: Date.now(),
+								};
+
+								// Display tool call to user
+								stream.markdown(
+									`\n🔧 **Tool call requested**: \`${part.name}\`\n\`\`\`json\n${JSON.stringify(part.input ?? {}, null, 2)}\n\`\`\``
+								);
+								stream.markdown(
+									"Use `/tool-approve` to execute this tool or `/tool-reject` to skip it. Waiting for your decision..."
+								);
 							}
 						},
 					},
 					token
 				);
 
+				// If there was a tool call, add it to the workflow state and wait for approval
+				if (pendingToolCall) {
+					await addToolCall(pendingToolCall);
+
+					// Show approval action buttons
+					stream.button({
+						title: "✓ Approve Tool",
+						command: "vscode.chat.openSymbolFromResult",
+						arguments: [],
+					});
+					stream.button({
+						title: "✗ Reject Tool",
+						command: "vscode.chat.openSymbolFromResult",
+						arguments: [],
+					});
+
+					// For now, in fallback chat we just inform the user to use commands
+					stream.markdown(
+						"\n**Next step:** Type `/tool-approve` to execute the tool request, or `/tool-reject` to skip it."
+					);
+				}
+
+				if (workflowCommand.loopInstruction) {
+					const state = getFallbackWorkflowState();
+					if (state?.loopEnabled) {
+						const checkpoint: FallbackWorkflowCheckpoint = {
+							id: createCheckpointId(),
+							createdAt: Date.now(),
+							goal: state.goal,
+							notes: [...state.notes],
+							instruction: workflowCommand.loopInstruction,
+							responseSummary: toResponseSummary(streamedTextBuffer),
+							approved: false,
+						};
+						const requireApproval = vscode.workspace
+							.getConfiguration("litellm-vscode-chat")
+							.get<boolean>("fallbackWorkflowState.requireApprovalGate", true);
+						await saveFallbackWorkflowState({
+							...state,
+							pendingApproval: requireApproval,
+							checkpoints: [...state.checkpoints, checkpoint],
+							notes: [...state.notes, `Checkpoint ${checkpoint.id}: ${checkpoint.responseSummary}`],
+						});
+						if (requireApproval) {
+							stream.progress(
+								`Checkpoint ${checkpoint.id} created. Approval required before next /loop-step. Use /loop-approve or /loop-rollback.`
+							);
+						}
+					}
+				}
+
 				return {
 					metadata: {
 						modelId: selectedModel.id,
-						mode: "fallback-chat-participant",
+						mode: workflowCommand.loopInstruction ? "fallback-loop-step" : "fallback-chat-participant",
 					},
 				};
 			} catch (error) {
@@ -324,22 +1043,107 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand("litellm.openFallbackChat", async () => {
 			await selectLiteLLMChatModel(true);
 			await vscode.commands.executeCommand("workbench.action.chat.open");
-			await vscode.window
-				.showInformationMessage(
-					"LiteLLM fallback chat is ready. In Chat, type @litellm to send messages through LiteLLM.",
-					"Copy Mention"
-				)
-				.then((choice) => {
-					if (choice === "Copy Mention") {
-						void vscode.env.clipboard.writeText("@litellm ");
-					}
-				});
+			await copyLitellmMention();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.use103ModelPickerWorkaround", async () => {
+			await runModelPickerWorkaround();
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("litellm.showModels", async () => {
 			await showLiteLLMModels();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.setFallbackTaskGoal", async () => {
+			const existing = getFallbackWorkflowState();
+			const goal = await vscode.window.showInputBox({
+				title: "Set Fallback Task Goal",
+				prompt: "Define the persistent goal for fallback chat (@litellm).",
+				ignoreFocusOut: true,
+				value: existing?.goal ?? "",
+			});
+			if (goal === undefined) {
+				return;
+			}
+
+			const trimmedGoal = goal.trim();
+			if (!trimmedGoal) {
+				await vscode.window.showWarningMessage(
+					"Task goal cannot be empty. Use Clear Fallback Task State to remove it."
+				);
+				return;
+			}
+
+			await saveFallbackWorkflowState({
+				goal: trimmedGoal,
+				notes: existing?.notes ?? [],
+				loopEnabled: existing?.loopEnabled ?? false,
+				pendingApproval: existing?.pendingApproval ?? false,
+				checkpoints: existing?.checkpoints ?? [],
+				toolCalls: existing?.toolCalls ?? [],
+				updatedAt: Date.now(),
+			});
+			await vscode.window.showInformationMessage("Fallback task goal saved.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.addFallbackTaskNote", async () => {
+			const note = await vscode.window.showInputBox({
+				title: "Add Fallback Task Note",
+				prompt: "Add a persistent note/checkpoint for fallback chat (@litellm).",
+				ignoreFocusOut: true,
+			});
+			if (note === undefined) {
+				return;
+			}
+
+			const trimmedNote = note.trim();
+			if (!trimmedNote) {
+				await vscode.window.showWarningMessage("Task note cannot be empty.");
+				return;
+			}
+
+			const existing =
+				getFallbackWorkflowState() ??
+				({
+					notes: [],
+					loopEnabled: false,
+					pendingApproval: false,
+					checkpoints: [],
+					toolCalls: [],
+					updatedAt: Date.now(),
+				} satisfies FallbackWorkflowState);
+			await saveFallbackWorkflowState({
+				...existing,
+				notes: [...existing.notes, trimmedNote],
+				toolCalls: existing.toolCalls,
+			});
+			await vscode.window.showInformationMessage("Fallback task note added.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.showFallbackTaskState", async () => {
+			const formatted = formatFallbackWorkflowState(getFallbackWorkflowState());
+			await vscode.window.showInformationMessage(formatted, { modal: true }, "Clear State").then((choice) => {
+				if (choice === "Clear State") {
+					vscode.commands.executeCommand("litellm.clearFallbackTaskState");
+				}
+			});
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.clearFallbackTaskState", async () => {
+			await clearFallbackWorkflowState();
+			await vscode.window.showInformationMessage("Fallback workflow state cleared.");
 		})
 	);
 
@@ -396,12 +1200,13 @@ export function activate(context: vscode.ExtensionContext) {
 							return;
 						}
 
-						const uri =
-							choice.value === "replace"
-								? await applyCodeEdit(editRequest.code, currentFile)
-								: await applyCodeEdit(editRequest.code);
-
-						await vscode.window.showInformationMessage(`Code edit applied: ${uri.fsPath || uri.scheme}`);
+						if (choice.value === "replace") {
+							const appliedUri = await applyCodeEdit(editRequest.code, currentFile);
+							await vscode.window.showInformationMessage(`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`);
+						} else {
+							const appliedUri = await applyCodeEdit(editRequest.code);
+							await vscode.window.showInformationMessage(`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`);
+						}
 					} else {
 						// No active editor, create untitled
 						await applyCodeEdit(editRequest.code);
@@ -444,7 +1249,8 @@ export function activate(context: vscode.ExtensionContext) {
 				"Reload Window",
 				"Search Extensions",
 				"Retry Registration",
-				"Open Fallback Chat"
+				"Open Fallback Chat",
+				"Use 1.103 Workaround"
 			)
 			.then((choice) => {
 				if (choice === "Reload Window") {
@@ -455,6 +1261,8 @@ export function activate(context: vscode.ExtensionContext) {
 					vscode.commands.executeCommand("litellm.retryProviderRegistration");
 				} else if (choice === "Open Fallback Chat") {
 					vscode.commands.executeCommand("litellm.openFallbackChat");
+				} else if (choice === "Use 1.103 Workaround") {
+					vscode.commands.executeCommand("litellm.use103ModelPickerWorkaround");
 				}
 			});
 
@@ -595,6 +1403,25 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		});
 		context.globalState.update("litellm.hasShownWelcome", true);
+	}
+
+	// On VS Code 1.103.x, proactively surface the workaround once.
+	if (likelyLimitedModelPickerUi) {
+		const hasShown103WorkaroundHint = context.globalState.get<boolean>("litellm.hasShown103WorkaroundHint", false);
+		if (!hasShown103WorkaroundHint) {
+			vscode.window
+				.showInformationMessage(
+					"LiteLLM: On VS Code 1.103.x, third-party models may not appear in Manage Models. Use the built-in workaround to pick a LiteLLM model and chat via @litellm.",
+					"Use 1.103 Workaround",
+					"Dismiss"
+				)
+				.then((choice) => {
+					if (choice === "Use 1.103 Workaround") {
+						vscode.commands.executeCommand("litellm.use103ModelPickerWorkaround");
+					}
+				});
+			context.globalState.update("litellm.hasShown103WorkaroundHint", true);
+		}
 	}
 
 	// Management command to configure base URL and API key
@@ -846,6 +1673,36 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("litellm.openfallbackchat", () =>
 			vscode.commands.executeCommand("litellm.openFallbackChat")
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.use103modelpickerworkaround", () =>
+			vscode.commands.executeCommand("litellm.use103ModelPickerWorkaround")
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.setfallbacktaskgoal", () =>
+			vscode.commands.executeCommand("litellm.setFallbackTaskGoal")
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.addfallbacktasknote", () =>
+			vscode.commands.executeCommand("litellm.addFallbackTaskNote")
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.showfallbacktaskstate", () =>
+			vscode.commands.executeCommand("litellm.showFallbackTaskState")
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.clearfallbacktaskstate", () =>
+			vscode.commands.executeCommand("litellm.clearFallbackTaskState")
 		)
 	);
 }

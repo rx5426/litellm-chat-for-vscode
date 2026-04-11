@@ -222,6 +222,55 @@ export class LiteLLMChatModelProvider implements LanguageModelChatProvider {
 		return longestMatch ? { ...longestMatch.value } : {};
 	}
 
+	/** Normalize a stop-sequence input into a de-duplicated string array. */
+	private normalizeStopSequences(value: unknown): string[] | undefined {
+		if (typeof value === "string") {
+			const trimmed = value.trim();
+			return trimmed ? [trimmed] : undefined;
+		}
+
+		if (!Array.isArray(value)) {
+			return undefined;
+		}
+
+		const seen = new Set<string>();
+		const out: string[] = [];
+		for (const item of value) {
+			if (typeof item !== "string") {
+				continue;
+			}
+			const trimmed = item.trim();
+			if (!trimmed || seen.has(trimmed)) {
+				continue;
+			}
+			seen.add(trimmed);
+			out.push(trimmed);
+		}
+
+		return out.length > 0 ? out : undefined;
+	}
+
+	/** Stop sequences fallback setting used by fallback chat when runtime options are unavailable. */
+	private getConfiguredStopSequences(): string[] | undefined {
+		const config = vscode.workspace.getConfiguration("litellm-vscode-chat");
+		const configured = config.get<unknown>("stopSequences", []);
+		return this.normalizeStopSequences(configured);
+	}
+
+	/**
+	 * Resolve stop sequences with precedence:
+	 * 1) runtime modelOptions.stop
+	 * 2) modelParameters.stop
+	 * 3) global litellm-vscode-chat.stopSequences setting
+	 */
+	private resolveStopSequences(runtimeStop: unknown, modelParamStop: unknown): string[] | undefined {
+		return (
+			this.normalizeStopSequences(runtimeStop) ??
+			this.normalizeStopSequences(modelParamStop) ??
+			this.getConfiguredStopSequences()
+		);
+	}
+
 	/**
 	 * Get the list of available language models contributed by this provider
 	 * @param options Options which specify the calling context of this function
@@ -802,7 +851,7 @@ export class LiteLLMChatModelProvider implements LanguageModelChatProvider {
 
 			// 3. Apply other model-specific parameters from configuration (max_tokens already handled)
 			for (const [key, value] of Object.entries(modelParams)) {
-				if (key !== "max_tokens") {
+				if (key !== "max_tokens" && key !== "stop") {
 					(requestBody as Record<string, unknown>)[key] = value;
 				}
 			}
@@ -817,9 +866,6 @@ export class LiteLLMChatModelProvider implements LanguageModelChatProvider {
 				}
 
 				// Apply other allow-listed parameters
-				if (typeof mo.stop === "string" || Array.isArray(mo.stop)) {
-					(requestBody as Record<string, unknown>).stop = mo.stop;
-				}
 				if (typeof mo.frequency_penalty === "number") {
 					(requestBody as Record<string, unknown>).frequency_penalty = mo.frequency_penalty;
 				}
@@ -829,6 +875,14 @@ export class LiteLLMChatModelProvider implements LanguageModelChatProvider {
 				if (typeof mo.top_p === "number") {
 					(requestBody as Record<string, unknown>).top_p = mo.top_p;
 				}
+			}
+
+			const resolvedStopSequences = this.resolveStopSequences(
+				(options.modelOptions as Record<string, unknown> | undefined)?.stop,
+				modelParams.stop
+			);
+			if (resolvedStopSequences) {
+				(requestBody as Record<string, unknown>).stop = resolvedStopSequences;
 			}
 
 			if (toolConfig.tools) {

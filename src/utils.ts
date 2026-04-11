@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import { execSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type {
 	OpenAIChatContentBlock,
 	OpenAIChatMessage,
@@ -412,14 +415,19 @@ export async function buildPromptWithReferences(
 		return prompt;
 	}
 
+	// VS Code provides references sorted in reverse order by range. Reorder them
+	// into prompt order so the numbered sections read naturally for the model.
+	const orderedReferences = orderReferencesByPromptPosition(references);
 	const resolveReferenceText = options?.resolveReferenceText ?? defaultResolveChatPromptReferenceText;
 	const maxReferenceChars = options?.maxReferenceChars ?? DEFAULT_MAX_REFERENCE_CHARS;
 	let remainingChars = options?.maxTotalReferenceChars ?? DEFAULT_MAX_TOTAL_REFERENCE_CHARS;
 	const sections: string[] = [];
+	const referencesWithOrder = orderedReferences.map((reference, index) => ({ reference, order: index + 1 }));
+	const rewrittenPrompt = rewritePromptReferenceMentions(prompt, referencesWithOrder);
 
-	for (const [index, reference] of references.entries()) {
+	for (const { reference, order } of referencesWithOrder) {
 		const resolved = await resolveReferenceText(reference);
-		const lines = [`Reference ${index + 1}`];
+		const lines = [`Reference ${order}`];
 
 		if (reference.modelDescription) {
 			lines.push(`Description: ${reference.modelDescription}`);
@@ -446,12 +454,83 @@ export async function buildPromptWithReferences(
 	}
 
 	if (sections.length === 0) {
+		return rewrittenPrompt;
+	}
+
+	const trimmedPrompt = rewrittenPrompt.trim();
+	const promptPrefix = trimmedPrompt ? `${trimmedPrompt}\n\n` : "";
+	return `${promptPrefix}Additional context from chat references:\n\n${sections.join("\n\n")}`;
+}
+
+function orderReferencesByPromptPosition(
+	references: readonly vscode.ChatPromptReference[]
+): readonly vscode.ChatPromptReference[] {
+	const indexed = references.map((reference, index) => ({ reference, index }));
+	indexed.sort((a, b) => {
+		const aStart = getReferenceRangeStart(a.reference);
+		const bStart = getReferenceRangeStart(b.reference);
+
+		if (aStart !== undefined && bStart !== undefined) {
+			return aStart - bStart;
+		}
+		if (aStart !== undefined) {
+			return -1;
+		}
+		if (bStart !== undefined) {
+			return 1;
+		}
+		return a.index - b.index;
+	});
+
+	return indexed.map((item) => item.reference);
+}
+
+function rewritePromptReferenceMentions(
+	prompt: string,
+	referencesWithOrder: ReadonlyArray<{ reference: vscode.ChatPromptReference; order: number }>
+): string {
+	if (!prompt || referencesWithOrder.length === 0) {
 		return prompt;
 	}
 
-	const trimmedPrompt = prompt.trim();
-	const promptPrefix = trimmedPrompt ? `${trimmedPrompt}\n\n` : "";
-	return `${promptPrefix}Additional context from chat references:\n\n${sections.join("\n\n")}`;
+	let rewritten = prompt;
+	const referencesWithRanges = referencesWithOrder
+		.filter((item) => hasValidReferenceRange(item.reference, prompt.length))
+		.sort((a, b) => {
+			const aStart = getReferenceRangeStart(a.reference) ?? 0;
+			const bStart = getReferenceRangeStart(b.reference) ?? 0;
+			return bStart - aStart;
+		});
+
+	for (const item of referencesWithRanges) {
+		const range = item.reference.range as [number, number];
+		const replacement = `[Reference ${item.order}]`;
+		rewritten = `${rewritten.slice(0, range[0])}${replacement}${rewritten.slice(range[1])}`;
+	}
+
+	return rewritten;
+}
+
+function getReferenceRangeStart(reference: vscode.ChatPromptReference): number | undefined {
+	if (!reference.range || reference.range.length !== 2) {
+		return undefined;
+	}
+	const [start, end] = reference.range;
+	if (typeof start !== "number" || typeof end !== "number" || start < 0 || end <= start) {
+		return undefined;
+	}
+	return start;
+}
+
+function hasValidReferenceRange(reference: vscode.ChatPromptReference, maxLength: number): boolean {
+	if (!reference.range || reference.range.length !== 2) {
+		return false;
+	}
+	const [start, end] = reference.range;
+	if (typeof start !== "number" || typeof end !== "number") {
+		return false;
+	}
+	return start >= 0 && end > start && end <= maxLength;
 }
 
 async function defaultResolveChatPromptReferenceText(
@@ -466,8 +545,10 @@ async function defaultResolveChatPromptReferenceText(
 	if (value instanceof vscode.Location) {
 		const label = `${formatUriForPrompt(value.uri)}:${value.range.start.line + 1}-${value.range.end.line + 1}`;
 		try {
-			const document = await vscode.workspace.openTextDocument(value.uri);
-			return { label, content: document.getText(value.range) };
+			return {
+				label,
+				content: (await vscode.workspace.openTextDocument(value.uri)).getText(value.range),
+			};
 		} catch {
 			return { label, content: reference.modelDescription };
 		}
@@ -476,8 +557,7 @@ async function defaultResolveChatPromptReferenceText(
 	if (value instanceof vscode.Uri) {
 		const label = formatUriForPrompt(value);
 		try {
-			const document = await vscode.workspace.openTextDocument(value);
-			return { label, content: document.getText() };
+			return { label, content: (await vscode.workspace.openTextDocument(value)).getText() };
 		} catch {
 			return { label, content: reference.modelDescription };
 		}
@@ -505,6 +585,114 @@ function truncateText(value: string, maxChars: number): string {
 
 	const suffix = "\n... [truncated]";
 	return `${value.slice(0, Math.max(0, maxChars - suffix.length))}${suffix}`;
+}
+
+function normalizeModelKey(value: string): string {
+	return value
+		.toLowerCase()
+		.trim()
+		.replace(/[:/_.\s]+/g, "-")
+		.replace(/[^a-z0-9-]/g, "")
+		.replace(/-+/g, "-")
+		.replace(/^-|-$/g, "");
+}
+
+function hasVersionToken(normalizedModelId: string, major: number, minor: number): boolean {
+	return (
+		normalizedModelId.includes(`${major}-${minor}`) ||
+		normalizedModelId.includes(`${major}${minor}`) ||
+		normalizedModelId.includes(`v${major}-${minor}`)
+	);
+}
+
+function buildFallbackModelOptionMatchKeys(modelId: string): string[] {
+	const unique = new Set<string>();
+	const push = (candidate: string | undefined) => {
+		if (!candidate) {
+			return;
+		}
+		const normalized = normalizeModelKey(candidate);
+		if (normalized) {
+			unique.add(normalized);
+		}
+	};
+
+	push(modelId);
+	const baseModelId = modelId.split(":")[0];
+	push(baseModelId);
+
+	const normalizedBase = normalizeModelKey(baseModelId);
+	if (!normalizedBase) {
+		return Array.from(unique);
+	}
+
+	if (normalizedBase.includes("claude") && normalizedBase.includes("haiku") && hasVersionToken(normalizedBase, 4, 5)) {
+		push("claude-code-haiku-4-5");
+		push("claude-haiku-4-5");
+	}
+
+	if (normalizedBase.includes("claude") && normalizedBase.includes("sonnet") && hasVersionToken(normalizedBase, 4, 6)) {
+		push("claude-code-sonnet-4-6");
+		push("claude-sonnet-4-6");
+	}
+
+	if (normalizedBase.includes("claude") && normalizedBase.includes("opus") && hasVersionToken(normalizedBase, 4, 6)) {
+		push("claude-code-opus-4-6");
+		push("claude-opus-4-6");
+	}
+
+	return Array.from(unique);
+}
+
+/**
+ * Resolve fallback chat model-specific options using robust matching against model aliases.
+ *
+ * Workaround: fallback chat model IDs often include router/provider suffixes such as
+ * `:cheapest`, `:fastest`, or `:provider-name`. This resolver strips those suffixes and
+ * also exposes Claude-friendly aliases so one setting key can match multiple LiteLLM IDs.
+ */
+export function resolveFallbackModelOptions(
+	modelId: string,
+	configuredOptions: Record<string, Record<string, unknown>>
+): { options?: Record<string, unknown>; matchedKey?: string } {
+	if (!modelId || !configuredOptions || typeof configuredOptions !== "object") {
+		return {};
+	}
+
+	const matchKeys = buildFallbackModelOptionMatchKeys(modelId);
+	let bestMatch: { key: string; value: Record<string, unknown>; normalizedKeyLength: number } | undefined;
+
+	for (const [key, value] of Object.entries(configuredOptions)) {
+		if (!value || typeof value !== "object") {
+			continue;
+		}
+		const normalizedKey = normalizeModelKey(key);
+		if (!normalizedKey) {
+			continue;
+		}
+
+		const isMatch = matchKeys.some((candidate) => candidate === normalizedKey || candidate.startsWith(normalizedKey));
+		if (!isMatch) {
+			continue;
+		}
+
+		if (!bestMatch || normalizedKey.length > bestMatch.normalizedKeyLength) {
+			bestMatch = {
+				key,
+				value: { ...value },
+				normalizedKeyLength: normalizedKey.length,
+			};
+		}
+	}
+
+	if (!bestMatch) {
+		return {};
+	}
+
+	return {
+		options: bestMatch.value,
+		matchedKey: bestMatch.key,
+	};
 }
 
 /**
@@ -600,4 +788,209 @@ export async function applyCodeEdit(code: string, filePath?: string, range?: vsc
 	editor.selection = new vscode.Selection(new vscode.Position(0, 0), new vscode.Position(0, 0));
 
 	return uri;
+}
+
+// Tool execution handlers for fallback tool calling
+
+export interface FallbackToolExecutionResult {
+	success: boolean;
+	output: string;
+	error?: string;
+}
+
+/**
+ * Execute a tool call with the given name and arguments.
+ * @param toolName The name of the tool to execute.
+ * @param toolArgs The arguments for the tool.
+ */
+export async function executeFallbackTool(
+	toolName: string,
+	toolArgs: Record<string, unknown>
+): Promise<FallbackToolExecutionResult> {
+	try {
+		switch (toolName) {
+			case "read_file":
+				return await executeFallbackReadFile(toolArgs);
+			case "write_file":
+				return await executeFallbackWriteFile(toolArgs);
+			case "execute_command":
+				return await executeFallbackExecuteCommand(toolArgs);
+			case "git_command":
+				return await executeFallbackGitCommand(toolArgs);
+			case "run_tests":
+				return await executeFallbackRunTests(toolArgs);
+			default:
+				return { success: false, output: "", error: `Unknown tool: ${toolName}` };
+		}
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: errorMsg };
+	}
+}
+
+async function executeFallbackReadFile(args: Record<string, unknown>): Promise<FallbackToolExecutionResult> {
+	const filePath = args.path as string | undefined;
+	if (!filePath) {
+		return { success: false, output: "", error: "Missing 'path' argument" };
+	}
+
+	try {
+		const uri = vscode.Uri.file(filePath);
+		const content = await vscode.workspace.fs.readFile(uri);
+		const text = new TextDecoder().decode(content);
+		return { success: true, output: text };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: `Failed to read file: ${errorMsg}` };
+	}
+}
+
+async function executeFallbackWriteFile(args: Record<string, unknown>): Promise<FallbackToolExecutionResult> {
+	const filePath = args.path as string | undefined;
+	const content = args.content as string | undefined;
+	if (!filePath || content === undefined) {
+		return { success: false, output: "", error: "Missing 'path' or 'content' argument" };
+	}
+
+	try {
+		const uri = vscode.Uri.file(filePath);
+		const encoded = new TextEncoder().encode(content);
+		await vscode.workspace.fs.writeFile(uri, encoded);
+		return { success: true, output: `File written successfully: ${filePath}` };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: `Failed to write file: ${errorMsg}` };
+	}
+}
+
+async function executeFallbackExecuteCommand(args: Record<string, unknown>): Promise<FallbackToolExecutionResult> {
+	const command = args.command as string | undefined;
+	const cwd = (args.cwd as string | undefined) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!command) {
+		return { success: false, output: "", error: "Missing 'command' argument" };
+	}
+
+	try {
+		const result = execSync(command, {
+			cwd,
+			encoding: "utf-8",
+			maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+		});
+		return { success: true, output: result };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: `Command failed: ${errorMsg}` };
+	}
+}
+
+async function executeFallbackGitCommand(args: Record<string, unknown>): Promise<FallbackToolExecutionResult> {
+	const action = args.action as string | undefined; // "status", "log", "diff", "branch", "checkout", "commit", "push", "pull"
+	const repoPath = (args.repo_path as string | undefined) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+	if (!action || !repoPath) {
+		return { success: false, output: "", error: "Missing 'action' or 'repo_path' argument" };
+	}
+
+	try {
+		let gitCommand: string;
+		switch (action) {
+			case "status":
+				gitCommand = "git status";
+				break;
+			case "log":
+				gitCommand = `git log --oneline -10`;
+				break;
+			case "diff":
+				gitCommand = `git diff`;
+				break;
+			case "branch":
+				gitCommand = `git branch -a`;
+				break;
+			case "checkout":
+				{
+					const branch = args.branch as string | undefined;
+					if (!branch) {
+						return { success: false, output: "", error: "Missing 'branch' for checkout action" };
+					}
+					gitCommand = `git checkout ${branch}`;
+				}
+				break;
+			case "commit":
+				{
+					const message = args.message as string | undefined;
+					if (!message) {
+						return { success: false, output: "", error: "Missing 'message' for commit action" };
+					}
+					gitCommand = `git commit -m "${message.replace(/"/g, '\\"')}"`;
+				}
+				break;
+			case "push":
+				gitCommand = `git push`;
+				break;
+			case "pull":
+				gitCommand = `git pull`;
+				break;
+			default:
+				return { success: false, output: "", error: `Unknown git action: ${action}` };
+		}
+
+		const result = execSync(gitCommand, {
+			cwd: repoPath,
+			encoding: "utf-8",
+			maxBuffer: 10 * 1024 * 1024,
+		});
+		return { success: true, output: result };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: `Git command failed: ${errorMsg}` };
+	}
+}
+
+async function executeFallbackRunTests(args: Record<string, unknown>): Promise<FallbackToolExecutionResult> {
+	const testPath = args.test_path as string | undefined;
+	const framework = (args.framework as string | undefined) ?? "auto"; // "auto", "jest", "mocha", "vitest"
+	const cwd = (args.cwd as string | undefined) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+	if (!testPath || !cwd) {
+		return { success: false, output: "", error: "Missing 'test_path' or workspace folder" };
+	}
+
+	try {
+		// Detect test runner if "auto"
+		let testCommand: string;
+		if (framework === "auto") {
+			const packageJsonPath = path.join(cwd, "package.json");
+			let packageJson = {};
+			if (fs.existsSync(packageJsonPath)) {
+				const content = fs.readFileSync(packageJsonPath, "utf-8");
+				packageJson = JSON.parse(content);
+			}
+
+			if ((packageJson as Record<string, unknown>).jest) {
+				testCommand = `npm test -- ${testPath}`;
+			} else if ((packageJson as Record<string, unknown>).vitest) {
+				testCommand = `npx vitest run ${testPath}`;
+			} else {
+				testCommand = `npm test -- ${testPath}`;
+			}
+		} else if (framework === "jest") {
+			testCommand = `npm test -- ${testPath}`;
+		} else if (framework === "mocha") {
+			testCommand = `npx mocha ${testPath}`;
+		} else if (framework === "vitest") {
+			testCommand = `npx vitest run ${testPath}`;
+		} else {
+			return { success: false, output: "", error: `Unknown test framework: ${framework}` };
+		}
+
+		const result = execSync(testCommand, {
+			cwd,
+			encoding: "utf-8",
+			maxBuffer: 10 * 1024 * 1024,
+		});
+		return { success: true, output: result };
+	} catch (error) {
+		const errorMsg = error instanceof Error ? error.message : String(error);
+		return { success: false, output: "", error: `Test execution failed: ${errorMsg}` };
+	}
 }
