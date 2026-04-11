@@ -577,13 +577,16 @@ export async function applyCodeEdit(code: string, filePath?: string, range?: vsc
 		edit.replace(uri, range, code);
 	} else {
 		// Replace all content
-		let document: vscode.TextDocument | null = null;
-		try {
-			document = await vscode.workspace.openTextDocument(uri);
-		} catch {
-			document = null;
-		}
-		if (document) {
+		const fileExists =
+			uri.scheme === "untitled"
+				? true
+				: await vscode.workspace.fs.stat(uri).then(
+						() => true,
+						() => false
+					);
+
+		if (fileExists) {
+			const document = await vscode.workspace.openTextDocument(uri);
 			const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
 			edit.replace(uri, fullRange, code);
 		} else {

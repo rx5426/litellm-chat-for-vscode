@@ -228,7 +228,7 @@ export function activate(context: vscode.ExtensionContext) {
 									if (autoApplyEdits) {
 										// Automatically apply to untitled editor
 										applyCodeEdit(block.code)
-											.then((uri) => {
+											.then((_uri) => {
 												appliedEditsCount++;
 												stream.progress(
 													`✓ Applied ${block.language} code to new editor (${appliedEditsCount}/${blocks.length})`
@@ -392,7 +392,9 @@ export function activate(context: vscode.ExtensionContext) {
 							{ title: "Apply Code Edit" }
 						);
 
-						if (!choice) return;
+						if (!choice) {
+							return;
+						}
 
 						const uri =
 							choice.value === "replace"
@@ -402,7 +404,7 @@ export function activate(context: vscode.ExtensionContext) {
 						await vscode.window.showInformationMessage(`Code edit applied: ${uri.fsPath || uri.scheme}`);
 					} else {
 						// No active editor, create untitled
-						const uri = await applyCodeEdit(editRequest.code);
+						await applyCodeEdit(editRequest.code);
 						await vscode.window.showInformationMessage(`Suggested edit opened in new editor.`);
 					}
 				} catch (error) {
