@@ -184,9 +184,7 @@ export function activate(context: vscode.ExtensionContext) {
 				for (const turn of chatContext.history) {
 					if (turn instanceof vscode.ChatRequestTurn) {
 						messages.push(
-							vscode.LanguageModelChatMessage.User(
-								await buildPromptWithReferences(turn.prompt, turn.references)
-							)
+							vscode.LanguageModelChatMessage.User(await buildPromptWithReferences(turn.prompt, turn.references))
 						);
 					} else if (turn instanceof vscode.ChatResponseTurn) {
 						const text = turn.response
@@ -199,9 +197,7 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 				}
 				messages.push(
-					vscode.LanguageModelChatMessage.User(
-						await buildPromptWithReferences(request.prompt, request.references)
-					)
+					vscode.LanguageModelChatMessage.User(await buildPromptWithReferences(request.prompt, request.references))
 				);
 
 				// Check if automatic code edits are enabled
@@ -225,9 +221,7 @@ export function activate(context: vscode.ExtensionContext) {
 								// Extract and offer code blocks for application
 								const blocks = extractCodeBlocks(text);
 								if (blocks.length > 0 && autoApplyEdits) {
-									stream.progress(
-										`Auto-applying ${blocks.length} code block${blocks.length > 1 ? "s" : ""}...`
-									);
+									stream.progress(`Auto-applying ${blocks.length} code block${blocks.length > 1 ? "s" : ""}...`);
 								}
 
 								for (const block of blocks) {
@@ -358,18 +352,12 @@ export function activate(context: vscode.ExtensionContext) {
 			try {
 				await config.update("autoApplyCodeEdits", newValue, vscode.ConfigurationTarget.Global);
 				const status = newValue ? "enabled" : "disabled";
-				await vscode.window.showInformationMessage(
-					`Auto-apply code edits ${status} for fallback chat (@litellm).`
-				);
-				outputChannel.appendLine(
-					`[${new Date().toISOString()}] Auto-apply code edits ${status} by user.`
-				);
+				await vscode.window.showInformationMessage(`Auto-apply code edits ${status} for fallback chat (@litellm).`);
+				outputChannel.appendLine(`[${new Date().toISOString()}] Auto-apply code edits ${status} by user.`);
 			} catch (error) {
 				const errorMsg = error instanceof Error ? error.message : String(error);
 				await vscode.window.showErrorMessage(`Failed to toggle auto-apply code edits: ${errorMsg}`);
-				outputChannel.appendLine(
-					`[${new Date().toISOString()}] Failed to toggle auto-apply code edits: ${errorMsg}`
-				);
+				outputChannel.appendLine(`[${new Date().toISOString()}] Failed to toggle auto-apply code edits: ${errorMsg}`);
 			}
 		})
 	);
@@ -411,9 +399,7 @@ export function activate(context: vscode.ExtensionContext) {
 								? await applyCodeEdit(editRequest.code, currentFile)
 								: await applyCodeEdit(editRequest.code);
 
-						await vscode.window.showInformationMessage(
-							`Code edit applied: ${uri.fsPath || uri.scheme}`
-						);
+						await vscode.window.showInformationMessage(`Code edit applied: ${uri.fsPath || uri.scheme}`);
 					} else {
 						// No active editor, create untitled
 						const uri = await applyCodeEdit(editRequest.code);

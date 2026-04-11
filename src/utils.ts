@@ -553,11 +553,7 @@ export function extractCodeBlocks(text: string): CodeBlockSuggestion[] {
  * @param range Optional range to replace instead of entire content.
  * @returns The URI of the editor where code was applied.
  */
-export async function applyCodeEdit(
-	code: string,
-	filePath?: string,
-	range?: vscode.Range
-): Promise<vscode.Uri> {
+export async function applyCodeEdit(code: string, filePath?: string, range?: vscode.Range): Promise<vscode.Uri> {
 	let uri: vscode.Uri;
 
 	if (filePath) {
@@ -588,10 +584,7 @@ export async function applyCodeEdit(
 			document = null;
 		}
 		if (document) {
-			const fullRange = new vscode.Range(
-				document.positionAt(0),
-				document.positionAt(document.getText().length)
-			);
+			const fullRange = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
 			edit.replace(uri, fullRange, code);
 		} else {
 			// For new files, insert at position 0

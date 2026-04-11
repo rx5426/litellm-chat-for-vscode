@@ -1,14 +1,14 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { LiteLLMChatModelProvider } from "../provider";
-	import {
-		buildPromptWithReferences,
-		convertMessages,
-		convertTools,
-		validateRequest,
-		validateTools,
-		tryParseJSONObject,
-	} from "../utils";
+import {
+	buildPromptWithReferences,
+	convertMessages,
+	convertTools,
+	validateRequest,
+	validateTools,
+	tryParseJSONObject,
+} from "../utils";
 
 interface OpenAIToolCall {
 	id: string;
@@ -1376,45 +1376,48 @@ suite("LiteLLM Chat Provider Extension", () => {
 		});
 	});
 });
-	suite("utils/chat references", () => {
-		test("buildPromptWithReferences includes selected code content for location references", async () => {
-			const reference = {
-				id: "selection",
-				modelDescription: "Selected code in src/example.ts",
-				value: new vscode.Location(vscode.Uri.file("f:/Vscode/litellm-vscode-chat/src/example.ts"), new vscode.Range(2, 0, 4, 0)),
-			} as vscode.ChatPromptReference;
+suite("utils/chat references", () => {
+	test("buildPromptWithReferences includes selected code content for location references", async () => {
+		const reference = {
+			id: "selection",
+			modelDescription: "Selected code in src/example.ts",
+			value: new vscode.Location(
+				vscode.Uri.file("f:/Vscode/litellm-vscode-chat/src/example.ts"),
+				new vscode.Range(2, 0, 4, 0)
+			),
+		} as vscode.ChatPromptReference;
 
-			const prompt = await buildPromptWithReferences("Explain this", [reference], {
-				resolveReferenceText: async () => ({
-					label: "src/example.ts:3-5",
-					content: "const answer = 42;\nreturn answer;",
-				}),
-			});
-
-			assert.ok(prompt.includes("Explain this"));
-			assert.ok(prompt.includes("Additional context from chat references:"));
-			assert.ok(prompt.includes("Selected code in src/example.ts"));
-			assert.ok(prompt.includes("src/example.ts:3-5"));
-			assert.ok(prompt.includes("const answer = 42;"));
+		const prompt = await buildPromptWithReferences("Explain this", [reference], {
+			resolveReferenceText: async () => ({
+				label: "src/example.ts:3-5",
+				content: "const answer = 42;\nreturn answer;",
+			}),
 		});
 
-		test("buildPromptWithReferences includes attached file content for uri references", async () => {
-			const reference = {
-				id: "file",
-				modelDescription: "Attached file src/config.json",
-				value: vscode.Uri.file("f:/Vscode/litellm-vscode-chat/src/config.json"),
-			} as vscode.ChatPromptReference;
-
-			const prompt = await buildPromptWithReferences("Review this file", [reference], {
-				resolveReferenceText: async () => ({
-					label: "src/config.json",
-					content: '{"enabled": true, "mode": "test"}',
-				}),
-			});
-
-			assert.ok(prompt.includes("Review this file"));
-			assert.ok(prompt.includes("Attached file src/config.json"));
-			assert.ok(prompt.includes("src/config.json"));
-			assert.ok(prompt.includes('"enabled": true'));
-		});
+		assert.ok(prompt.includes("Explain this"));
+		assert.ok(prompt.includes("Additional context from chat references:"));
+		assert.ok(prompt.includes("Selected code in src/example.ts"));
+		assert.ok(prompt.includes("src/example.ts:3-5"));
+		assert.ok(prompt.includes("const answer = 42;"));
 	});
+
+	test("buildPromptWithReferences includes attached file content for uri references", async () => {
+		const reference = {
+			id: "file",
+			modelDescription: "Attached file src/config.json",
+			value: vscode.Uri.file("f:/Vscode/litellm-vscode-chat/src/config.json"),
+		} as vscode.ChatPromptReference;
+
+		const prompt = await buildPromptWithReferences("Review this file", [reference], {
+			resolveReferenceText: async () => ({
+				label: "src/config.json",
+				content: '{"enabled": true, "mode": "test"}',
+			}),
+		});
+
+		assert.ok(prompt.includes("Review this file"));
+		assert.ok(prompt.includes("Attached file src/config.json"));
+		assert.ok(prompt.includes("src/config.json"));
+		assert.ok(prompt.includes('"enabled": true'));
+	});
+});
