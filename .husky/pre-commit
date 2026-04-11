@@ -1,0 +1,30 @@
+#!/bin/sh
+
+# Refuse to mutate the repo during commits. Dependencies should already exist.
+if [ ! -d node_modules ]; then
+	echo "Dependencies are missing. Run 'bun install' before committing."
+	exit 1
+fi
+
+# Run formatting on staged files
+bunx lint-staged
+
+# Check formatting for all files
+bunx prettier --write .
+
+# Check if any files were modified by formatting
+if ! git diff --exit-code; then
+	echo ""
+	echo "❌ Formatting changes detected!"
+	echo "Files were modified by prettier. Please review and stage the changes, then commit again."
+	exit 1
+fi
+
+# Lint GitHub Actions workflows
+bun run lint:actions
+
+# Run linting
+bun run lint
+
+# Run tests
+bun run test

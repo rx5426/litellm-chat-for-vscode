@@ -1,0 +1,188 @@
+{
+	"name": "litellm-chat-for-vscode",
+	"publisher": "rx5426",
+	"displayName": "LiteLLM chat for Visual Studio Code",
+	"description": "An extension that integrates LiteLLM into Visual Studio Code",
+	"icon": "assets/logo.png",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
+	},
+	"version": "0.1.25",
+	"engines": {
+		"vscode": "^1.103.0"
+	},
+	"activationEvents": [
+		"onStartupFinished"
+	],
+	"categories": [
+		"AI",
+		"Chat"
+	],
+	"galleryBanner": {
+		"color": "#100f11",
+		"theme": "dark"
+	},
+	"badges": [
+		{
+			"url": "https://img.shields.io/github/stars/rx5426/litellm-chat-for-vscode?style=social",
+			"description": "Star litellm-chat-for-vscode on Github",
+			"href": "https://github.com/rx5426/litellm-chat-for-vscode"
+		}
+	],
+	"homepage": "https://github.com/rx5426/litellm-chat-for-vscode",
+	"bugs": {
+		"url": "https://github.com/rx5426/litellm-chat-for-vscode/issues"
+	},
+	"license": "MIT",
+	"contributes": {
+		"chatParticipants": [
+			{
+				"id": "rx5426.litellm-chat",
+				"name": "litellm",
+				"fullName": "LiteLLM",
+				"description": "Chat with LiteLLM directly when the VS Code model picker is unavailable.",
+				"isSticky": true
+			}
+		],
+		"languageModelChatProviders": [
+			{
+				"vendor": "litellm",
+				"displayName": "LiteLLM",
+				"managementCommand": "litellm.manage"
+			}
+		],
+		"commands": [
+			{
+				"command": "litellm.manage",
+				"title": "Manage LiteLLM Provider"
+			},
+			{
+				"command": "litellm.testConnection",
+				"title": "LiteLLM: Test Connection"
+			},
+			{
+				"command": "litellm.testconnection",
+				"title": "LiteLLM: Test Connection"
+			},
+			{
+				"command": "litellm.showDiagnostics",
+				"title": "LiteLLM: Show Diagnostics"
+			},
+			{
+				"command": "litellm.showdiagnostics",
+				"title": "LiteLLM: Show Diagnostics"
+			},
+			{
+				"command": "litellm.retryProviderRegistration",
+				"title": "LiteLLM: Retry Provider Registration"
+			},
+			{
+				"command": "litellm.retryproviderregistration",
+				"title": "LiteLLM: Retry Provider Registration"
+			},
+			{
+				"command": "litellm.selectChatModel",
+				"title": "LiteLLM: Select Chat Model"
+			},
+			{
+				"command": "litellm.openFallbackChat",
+				"title": "LiteLLM: Open Fallback Chat"
+			},
+			{
+				"command": "litellm.showModels",
+				"title": "LiteLLM: Show Available Models"
+			},
+			{
+				"command": "litellm.showmodels",
+				"title": "LiteLLM: Show Available Models"
+			},
+			{
+				"command": "litellm.toggleAutoApplyCodeEdits",
+				"title": "LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)"
+			}
+		],
+		"configuration": {
+			"title": "LiteLLM VS Code Chat",
+			"properties": {
+				"litellm-vscode-chat.defaultMaxOutputTokens": {
+					"type": "number",
+					"default": 16000,
+					"minimum": 1,
+					"description": "Default maximum output tokens when not provided by model info"
+				},
+				"litellm-vscode-chat.defaultContextLength": {
+					"type": "number",
+					"default": 128000,
+					"minimum": 1,
+					"description": "Default context length when not provided by model info"
+				},
+				"litellm-vscode-chat.defaultMaxInputTokens": {
+					"type": [
+						"number",
+						"null"
+					],
+					"default": null,
+					"minimum": 1,
+					"description": "Default maximum input tokens (if null, calculated as contextLength - maxOutputTokens)"
+				},
+				"litellm-vscode-chat.promptCaching.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable prompt caching for supported models (currently Anthropic Claude). Caches the system prompt to reduce costs and improve response times. Only affects models that advertise prompt caching support."
+				},
+				"litellm-vscode-chat.modelParameters": {
+					"type": "object",
+					"default": {},
+					"description": "Model-specific request parameters to customize API behavior. Supports max_tokens, temperature, top_p, frequency_penalty, presence_penalty, stop, etc. Uses longest prefix matching (e.g., 'gpt-4' matches 'gpt-4-turbo:openai').",
+					"additionalProperties": {
+						"type": "object"
+					}
+				},
+				"litellm-vscode-chat.autoApplyCodeEdits": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically apply code edits from fallback chat (@litellm) responses. When enabled, code blocks are applied to new untitled editors without requiring manual approval. Use the 'Toggle Auto-Apply Code Edits' command to enable/disable during a session."
+				}
+			}
+		}
+	},
+	"main": "./out/extension.js",
+	"scripts": {
+		"prepare": "husky",
+		"vscode:prepublish": "bun run compile",
+		"sync:vscode-api": "dts dev && dts main && node -e \"const fs = require('fs'); if (fs.existsSync('vscode.d.ts')) { fs.renameSync('vscode.d.ts', 'src/vscode.d.ts'); console.log('Moved vscode.d.ts to src/'); }\"",
+		"compile": "tsc -p ./",
+		"lint:actions": "node scripts/lint-actions.js",
+		"lint": "eslint",
+		"format": "prettier --write .",
+		"watch": "tsc -watch -p ./",
+		"mock-server": "node scripts/mock-litellm-server.js",
+		"test": "bun run compile && node --no-deprecation ./node_modules/@vscode/test-cli/out/bin.mjs",
+		"test:1032": "bun run compile && node --no-deprecation ./node_modules/@vscode/test-cli/out/bin.mjs --code-version 1.103.2",
+		"bump-version": "node scripts/bump-version.js"
+	},
+	"devDependencies": {
+		"@eslint/js": "^10.0.0",
+		"@stylistic/eslint-plugin": "^5.10.0",
+		"@types/mocha": "^10.0.10",
+		"@types/node": "^25.5.0",
+		"@types/vscode": "^1.103.0",
+		"@vscode/dts": "^0.4.1",
+		"@vscode/test-cli": "^0.0.12",
+		"@vscode/test-electron": "^2.5.2",
+		"actionlint": "^2.0.6",
+		"eslint": "^10.1.0",
+		"husky": "^9.1.7",
+		"lint-staged": "^16.4.0",
+		"prettier": "^3.8.1",
+		"ts-mocha": "^11.1.0",
+		"ts-node": "^10.9.2",
+		"typescript": "^6.0.2",
+		"typescript-eslint": "^8.58.0"
+	},
+	"packageManager": "bun@1.3.9",
+	"lint-staged": {
+		"*.{js,ts,json,md,yml,yaml}": "prettier --write"
+	}
+}
