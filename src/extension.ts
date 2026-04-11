@@ -1202,10 +1202,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 						if (choice.value === "replace") {
 							const appliedUri = await applyCodeEdit(editRequest.code, currentFile);
-							await vscode.window.showInformationMessage(`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`);
+							await vscode.window.showInformationMessage(
+								`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`
+							);
 						} else {
 							const appliedUri = await applyCodeEdit(editRequest.code);
-							await vscode.window.showInformationMessage(`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`);
+							await vscode.window.showInformationMessage(
+								`Code edit applied: ${appliedUri.fsPath || appliedUri.scheme}`
+							);
 						}
 					} else {
 						// No active editor, create untitled

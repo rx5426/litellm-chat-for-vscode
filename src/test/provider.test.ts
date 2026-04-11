@@ -1852,6 +1852,15 @@ suite("extension/fallback commands", () => {
 
 	test("1.103 workaround hint is shown only once", async () => {
 		let workaroundHintShownCount = 0;
+		const parseVersion = (value: string): [number, number, number] => {
+			const [major = "0", minor = "0", patch = "0"] = value.split(".");
+			const toNum = (part: string) => Number.parseInt(part.replace(/[^0-9]/g, ""), 10) || 0;
+			return [toNum(major), toNum(minor), toNum(patch)];
+		};
+		const isLikelyLimitedModelPickerUi = (() => {
+			const [major, minor] = parseVersion(vscode.version);
+			return major < 1 || (major === 1 && minor < 108);
+		})();
 
 		vscode.window.showQuickPick = (async (items: readonly unknown[]) =>
 			items[0] as never) as unknown as typeof vscode.window.showQuickPick;
@@ -1882,8 +1891,8 @@ suite("extension/fallback commands", () => {
 		activate(context);
 		activate(context);
 
-		assert.equal(workaroundHintShownCount, 1);
-		assert.equal(state.get("litellm.hasShown103WorkaroundHint"), true);
+		assert.equal(workaroundHintShownCount, isLikelyLimitedModelPickerUi ? 1 : 0);
+		assert.equal(state.get("litellm.hasShown103WorkaroundHint"), isLikelyLimitedModelPickerUi ? true : undefined);
 	});
 
 	test("fallback workflow slash command /goal persists task goal", async () => {
