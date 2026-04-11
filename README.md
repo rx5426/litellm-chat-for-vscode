@@ -1,4 +1,4 @@
-# LiteLLM Provider for GitHub Copilot Chat
+# LiteLLM Provider for GitHub Copilot Chat on VS Code
 
 Use 100+ LLMs in VS Code with GitHub Copilot Chat powered by [LiteLLM](https://docs.litellm.ai).
 
