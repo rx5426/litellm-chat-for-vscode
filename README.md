@@ -7,6 +7,9 @@ Use 100+ LLMs in VS Code with GitHub Copilot Chat powered by [LiteLLM](https://d
 - Access 100+ LLMs (OpenAI, Anthropic, Google, AWS, Azure, and more) through a unified API
 - Automatic provider selection with `cheapest` and `fastest` modes
 - Support for streaming, function calling, and vision models
+- Fallback chat participant `@litellm` for VS Code builds where third-party model picking is limited
+- Optional auto-apply workflow for code blocks generated in fallback chat
+- Chat reference support in fallback chat (selected code, files, and attached context)
 - Self-hosted or cloud-based deployment options
 
 ## Requirements
@@ -23,6 +26,41 @@ Use 100+ LLMs in VS Code with GitHub Copilot Chat powered by [LiteLLM](https://d
 4. Enter your LiteLLM base URL (e.g., `http://localhost:4000`)
 5. Enter your API key (if required)
 6. Select models to add
+7. If model picker integration is unavailable in your VS Code version, open chat and use `@litellm`
+
+## Fallback Chat (`@litellm`)
+
+When VS Code cannot surface LiteLLM models directly in the model picker, you can still chat through LiteLLM using the built-in fallback participant.
+
+### How To Use
+
+1. Open Chat in VS Code
+2. Type `@litellm` followed by your prompt
+3. (Optional) Attach files or code references in Chat; they are included in the sent prompt
+4. Receive streamed responses from the LiteLLM-selected model
+
+### Fallback Commands
+
+Use Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
+
+- `LiteLLM: Open Fallback Chat` - Opens chat and prepares `@litellm` usage
+- `LiteLLM: Select Chat Model` - Sets which LiteLLM model fallback chat should use
+- `LiteLLM: Show Available Models` - Lists models returned by your LiteLLM server
+- `LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)` - Turns automatic code-block application on/off
+
+### Code Edit Application In Fallback Chat
+
+Fallback chat can extract fenced code blocks from responses and apply them in VS Code:
+
+- Auto-apply enabled: code blocks are opened/applied automatically (new untitled editor by default)
+- Auto-apply disabled: you get an `Apply ... edit` button for each detected code block
+- Manual apply command prompts to replace the active file or open in a new untitled editor
+
+Setting:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `litellm-vscode-chat.autoApplyCodeEdits` | `true` | Auto-apply fallback chat code blocks to editors |
 
 ## Configuration
 
