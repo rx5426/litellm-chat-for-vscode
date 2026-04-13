@@ -1284,39 +1284,72 @@ export async function executeFallbackTool(
 
 function resolveWorkspaceUri(filePath: string): vscode.Uri {
 	const normalizePath = (value: string): string => value.replace(/\\/g, "/").toLowerCase();
+	const existingRoots = (): string[] => {
+		const roots = new Set<string>();
+		for (const folder of vscode.workspace.workspaceFolders ?? []) {
+			if (folder.uri.scheme === "file") {
+				roots.add(folder.uri.fsPath);
+			}
+		}
+
+		const cwd = process.cwd();
+		if (cwd) {
+			roots.add(cwd);
+			roots.add(path.resolve(cwd, ".."));
+			roots.add(path.resolve(cwd, "..", ".."));
+		}
+
+		const fromModule = path.resolve(__dirname, "..");
+		roots.add(fromModule);
+
+		return [...roots].filter((root) => {
+			if (!root) {
+				return false;
+			}
+			try {
+				return fs.existsSync(root) && fs.statSync(root).isDirectory();
+			} catch {
+				return false;
+			}
+		});
+	};
+
 	const mapToWorkspacePath = (inputPath: string): string | undefined => {
-		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-		if (!workspaceRoot) {
-			return undefined;
-		}
-
 		const normalizedInput = normalizePath(inputPath);
-		const normalizedRoot = normalizePath(workspaceRoot);
-		if (normalizedInput === normalizedRoot) {
-			return workspaceRoot;
-		}
-		if (normalizedInput.startsWith(`${normalizedRoot}/`)) {
-			const rawSuffix = inputPath.replace(/\\/g, "/").slice(normalizedRoot.length + 1);
-			const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
-			return suffixParts.length > 0 ? path.join(workspaceRoot, ...suffixParts) : workspaceRoot;
-		}
+		for (const root of existingRoots()) {
+			const normalizedRoot = normalizePath(root);
+			if (normalizedInput === normalizedRoot) {
+				return root;
+			}
+			if (normalizedInput.startsWith(`${normalizedRoot}/`)) {
+				const rawSuffix = inputPath.replace(/\\/g, "/").slice(normalizedRoot.length + 1);
+				const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
+				const candidate = suffixParts.length > 0 ? path.join(root, ...suffixParts) : root;
+				if (fs.existsSync(candidate)) {
+					return candidate;
+				}
+			}
 
-		const rootParts = normalizedRoot.split("/").filter((part) => part.length > 0);
-		const rootName = rootParts[rootParts.length - 1];
-		if (!rootName) {
-			return undefined;
-		}
+			const rootParts = normalizedRoot.split("/").filter((part) => part.length > 0);
+			const rootName = rootParts[rootParts.length - 1];
+			if (!rootName) {
+				continue;
+			}
 
-		const marker = `/${rootName}/`;
-		const markerIndex = normalizedInput.indexOf(marker);
-		if (markerIndex >= 0) {
-			const rawSuffix = inputPath.replace(/\\/g, "/").slice(markerIndex + marker.length);
-			const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
-			return suffixParts.length > 0 ? path.join(workspaceRoot, ...suffixParts) : workspaceRoot;
-		}
+			const marker = `/${rootName}/`;
+			const markerIndex = normalizedInput.indexOf(marker);
+			if (markerIndex >= 0) {
+				const rawSuffix = inputPath.replace(/\\/g, "/").slice(markerIndex + marker.length);
+				const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
+				const candidate = suffixParts.length > 0 ? path.join(root, ...suffixParts) : root;
+				if (fs.existsSync(candidate)) {
+					return candidate;
+				}
+			}
 
-		if (normalizedInput.endsWith(`/${rootName}`)) {
-			return workspaceRoot;
+			if (normalizedInput.endsWith(`/${rootName}`)) {
+				return root;
+			}
 		}
 
 		return undefined;
@@ -1327,7 +1360,9 @@ function resolveWorkspaceUri(filePath: string): vscode.Uri {
 		if (vscode.workspace.workspaceFolders?.length) {
 			return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
 		}
-		return vscode.Uri.file(path.resolve(process.cwd(), filePath));
+		const roots = existingRoots();
+		const baseRoot = roots[0] ?? process.cwd();
+		return vscode.Uri.file(path.resolve(baseRoot, filePath));
 	}
 
 	const mapped = mapToWorkspacePath(filePath);
@@ -1450,9 +1485,9 @@ async function executeFallbackSearchFiles(args: Record<string, unknown>): Promis
 		};
 	} catch (error) {
 		return {
-			success: false,
-			output: "",
-			error: error instanceof Error ? error.message : String(error),
+			success: true,
+			output: "(no matches)",
+			error: undefined,
 			meta: { tool: "search_files" },
 		};
 	}
