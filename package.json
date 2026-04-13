@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
 	},
-	"version": "0.1.33",
+	"version": "0.1.34",
 	"engines": {
 		"vscode": "^1.103.0"
 	},

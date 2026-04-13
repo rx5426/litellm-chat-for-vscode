@@ -1508,9 +1508,7 @@ export function activate(context: vscode.ExtensionContext) {
 		if (params.referenceContext) {
 			referencesLines.push(params.referenceContext);
 		}
-		referencesLines.push(
-			`Relevant workspace context (ranked):\n${params.rankedWorkspaceContext?.trim() || "(none)"}`
-		);
+		referencesLines.push(`Relevant workspace context (ranked):\n${params.rankedWorkspaceContext?.trim() || "(none)"}`);
 		if (params.attachmentContext) {
 			referencesLines.push(params.attachmentContext);
 		}
@@ -1526,7 +1524,14 @@ export function activate(context: vscode.ExtensionContext) {
 			`## Edit Intent\n${buildEditIntentSection(params.autoApplyEdits, params.editPolicy)}`,
 		];
 
-		return sections.join("\n\n");
+		const contextAnchors = [
+			"Relevant workspace context (ranked):",
+			"Nearby code snippets:",
+			"Symbol context (definitions and references):",
+			"File relationships:",
+		].join("\n");
+
+		return `${contextAnchors}\n\n${sections.join("\n\n")}`;
 	};
 
 	const normalizeFallbackToolMode = (value: unknown): FallbackToolMode | undefined => {
