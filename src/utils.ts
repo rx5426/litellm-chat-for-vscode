@@ -1285,7 +1285,7 @@ export async function executeFallbackTool(
 function resolveWorkspaceUri(filePath: string): vscode.Uri {
 	const normalizePath = (value: string): string => value.replace(/\\/g, "/").toLowerCase();
 	const mapToWorkspacePath = (inputPath: string): string | undefined => {
-		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 		if (!workspaceRoot) {
 			return undefined;
 		}
@@ -1323,8 +1323,11 @@ function resolveWorkspaceUri(filePath: string): vscode.Uri {
 	};
 
 	const isAbsolute = filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath);
-	if (!isAbsolute && vscode.workspace.workspaceFolders?.length) {
-		return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
+	if (!isAbsolute) {
+		if (vscode.workspace.workspaceFolders?.length) {
+			return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
+		}
+		return vscode.Uri.file(path.resolve(process.cwd(), filePath));
 	}
 
 	const mapped = mapToWorkspacePath(filePath);

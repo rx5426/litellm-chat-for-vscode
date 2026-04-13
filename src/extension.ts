@@ -536,8 +536,11 @@ export function activate(context: vscode.ExtensionContext) {
 			return undefined;
 		}
 		const isAbsolute = filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath);
-		if (!isAbsolute && vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
-			return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
+		if (!isAbsolute) {
+			if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0) {
+				return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
+			}
+			return vscode.Uri.file(path.resolve(process.cwd(), filePath));
 		}
 		return vscode.Uri.file(filePath);
 	};
