@@ -1522,13 +1522,14 @@ export function activate(context: vscode.ExtensionContext) {
 
 		const sections = [
 			`## Task\n${params.taskPrompt.trim() || "(empty)"}`,
-			`## References\n${referencesLines.length > 0 ? referencesLines.join("\n\n") : "(none)"}`,
+			`## References:\n${referencesLines.length > 0 ? referencesLines.join("\n\n") : "(none)"}`,
 			`## Workflow State\n${buildWorkflowStateSection(params.workflowState)}`,
 			`## Tool Results\n${buildToolResultsSection(params.workflowState)}`,
 			`## Edit Intent\n${buildEditIntentSection(params.autoApplyEdits, params.editPolicy)}`,
 		];
 
 		const contextAnchors = [
+			"References:",
 			"Relevant workspace context (ranked):",
 			"Nearby code snippets:",
 			"Symbol context (definitions and references):",
