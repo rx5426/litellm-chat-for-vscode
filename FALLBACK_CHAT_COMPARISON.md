@@ -15,8 +15,10 @@ This document reflects the current implementation status.
 | Model parameter support | Yes | Yes | Provider applies temperature, top_p, penalties, max_tokens, stop |
 | Stop sequences | Yes | Yes | Resolved with runtime, model, and global fallback precedence |
 | Reference handling | Yes | Yes | Fallback injects reference context into prompt text |
-| Code block extraction | Yes | Yes | Shared extraction logic |
-| Code edit application | Yes | Yes | Fallback supports auto-apply and manual apply buttons |
+| Code block extraction | Yes | Yes | Shared extraction logic remains as fallback |
+| Structured edit contract | Yes | No equivalent workaround needed | Fallback now supports `litellm-edit` JSON blocks with path + intent + content |
+| Code edit application | Yes | Yes | Fallback supports staged multi-file review for structured edits plus code-block fallback |
+| Fallback edit safety policies | Configurable | Native platform protections | Fallback supports path-required, same-file-only, workspace-only, and max-files-per-response guards |
 | Diagnostics/logging | Yes | Yes | Output channel + status reporting |
 
 ### Fallback Workarounds Added
@@ -67,7 +69,8 @@ This document reflects the current implementation status.
 
 Default behavior is enabled unless changed by user settings.
 
-- Enabled: extracted code blocks are auto-opened in new untitled editors
+- Preferred: structured `litellm-edit` blocks are staged for review, preview, accept/reject, and batch apply
+- Fallback: extracted code blocks are still supported when the model does not emit structured edits
 - Disabled: fallback shows per-block apply buttons
 - Toggle command: LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)
 
@@ -82,4 +85,4 @@ Implemented coverage includes:
 
 ## Summary
 
-Fallback chat is no longer a basic text-only mode. It now supports practical model-specific runtime tuning through configuration-driven workarounds, including Claude-focused mappings, stop-sequence handling, and stronger reference-context injection.
+Fallback chat is no longer a basic text-only mode. It now supports practical model-specific runtime tuning through configuration-driven workarounds, including Claude-focused mappings, stop-sequence handling, stronger reference-context injection, and a structured edit contract that reduces reliance on raw code-fence heuristics.

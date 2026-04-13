@@ -55,6 +55,9 @@ Use Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 - `LiteLLM: Reject Tool Call (Fallback Chat)` - Skips a tool call
 - `LiteLLM: Show Tool Call Status (Fallback Chat)` - Displays tool call history
 - `LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)` - Turns automatic code-block application on/off
+- `LiteLLM: Show Staged Edits (Fallback Chat)` - Shows the current staged multi-file edit batch
+- `LiteLLM: Apply Staged Edits (Fallback Chat)` - Applies all staged edits that are not rejected
+- `LiteLLM: Discard Staged Edits (Fallback Chat)` - Clears the current staged edit batch without applying it
 
 ### Long-Workflow State In Fallback Chat
 
@@ -119,15 +122,51 @@ Configuration settings for tool calling:
 
 Fallback chat can extract fenced code blocks from responses and apply them in VS Code:
 
-- Auto-apply enabled: code blocks are opened/applied automatically (new untitled editor by default)
+- Preferred format: structured `litellm-edit` blocks with JSON containing `path`, `intent` (`create` or `replace`), and full file `content`
+- Structured edits are now staged for review before they modify workspace files
+- Auto-apply enabled: code blocks are applied automatically to detected file paths when available
+- If no path is detected, the first untargeted block can fall back to the active editor file
+- Remaining untargeted blocks are opened in new untitled editors
 - Auto-apply disabled: you get an `Apply ... edit` button for each detected code block
-- Manual apply command prompts to replace the active file or open in a new untitled editor
+- Manual apply command prompts to replace the active file, apply to a suggested path (when present), or open in a new untitled editor
+
+Structured edit format:
+
+```litellm-edit
+{
+  "path": "src/example.ts",
+  "intent": "replace",
+  "language": "ts",
+  "content": "export const example = true;"
+}
+```
+
+Fallback chat now prefers these structured edit blocks over raw code-fence heuristics. Intent is enforced during apply:
+- `create` fails if the target file already exists
+- `replace` fails if the target file does not exist
+- patch-only structured edits are parsed but not auto-applied yet
+
+When fallback receives multiple structured edits, it stages them as a review batch:
+- A staged summary is shown in chat
+- Each file gets `Preview`, `Accept`, and `Reject` controls
+- `Apply Staged Edits` applies all files that are not rejected
+- `Discard Staged Edits` clears the batch without changing workspace files
+
+Safer auto-apply policy modes:
+- `fallbackEditPolicy.pathRequired`: skip untargeted edits entirely
+- `fallbackEditPolicy.sameFileOnly`: only allow edits that target the active file
+- `fallbackEditPolicy.workspaceOnly`: block edits outside the current workspace
+- `fallbackEditPolicy.maxFilesPerResponse`: reject oversized multi-file edit batches
 
 Setting:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `litellm-vscode-chat.autoApplyCodeEdits` | `true` | Auto-apply fallback chat code blocks to editors |
+| `litellm-vscode-chat.fallbackEditPolicy.pathRequired` | `false` | Require fallback edits to specify a target path |
+| `litellm-vscode-chat.fallbackEditPolicy.sameFileOnly` | `false` | Restrict fallback edits to the active file |
+| `litellm-vscode-chat.fallbackEditPolicy.workspaceOnly` | `false` | Block fallback edits outside the workspace |
+| `litellm-vscode-chat.fallbackEditPolicy.maxFilesPerResponse` | `null` | Maximum files a single fallback response may stage or auto-apply |
 
 ## Configuration
 

@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
 	},
-	"version": "0.1.28",
+	"version": "0.1.29",
 	"engines": {
 		"vscode": "^1.103.0"
 	},
@@ -132,6 +132,18 @@
 			{
 				"command": "litellm.showFallbackToolStatus",
 				"title": "LiteLLM: Show Tool Call Status (Fallback Chat)"
+			},
+			{
+				"command": "litellm.showStagedEdits",
+				"title": "LiteLLM: Show Staged Edits (Fallback Chat)"
+			},
+			{
+				"command": "litellm.applyStagedEdits",
+				"title": "LiteLLM: Apply Staged Edits (Fallback Chat)"
+			},
+			{
+				"command": "litellm.discardStagedEdits",
+				"title": "LiteLLM: Discard Staged Edits (Fallback Chat)"
 			}
 		],
 		"configuration": {
@@ -218,10 +230,76 @@
 					"default": true,
 					"description": "Require explicit /loop-approve between fallback autonomous loop steps."
 				},
+				"litellm-vscode-chat.fallbackContextRetrieval.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable lightweight ranked workspace context retrieval for fallback prompts."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.searchGlob": {
+					"type": "string",
+					"default": "**/*.{ts,tsx,js,jsx,mjs,cjs,json,md,yml,yaml}",
+					"description": "Glob used when searching candidate files for fallback ranked context retrieval."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxSearchFiles": {
+					"type": "number",
+					"default": 250,
+					"minimum": 20,
+					"description": "Maximum files to consider during fallback context retrieval ranking."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxFiles": {
+					"type": "number",
+					"default": 4,
+					"minimum": 1,
+					"description": "Maximum ranked files to include in fallback prompt context."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxSnippetLines": {
+					"type": "number",
+					"default": 8,
+					"minimum": 3,
+					"description": "Maximum snippet lines per ranked file in fallback prompt context."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxChars": {
+					"type": "number",
+					"default": 2600,
+					"minimum": 500,
+					"description": "Maximum total characters for injected ranked workspace context in fallback prompts."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxSymbols": {
+					"type": "number",
+					"default": 6,
+					"minimum": 0,
+					"description": "Maximum number of matched symbols to include in fallback symbol-aware context."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.maxReferencesPerSymbol": {
+					"type": "number",
+					"default": 3,
+					"minimum": 0,
+					"description": "Maximum references to include per matched symbol in fallback context."
+				},
+				"litellm-vscode-chat.fallbackContextRetrieval.includeFileRelationships": {
+					"type": "boolean",
+					"default": true,
+					"description": "Include import/export-based file relationship hints in fallback context."
+				},
 				"litellm-vscode-chat.fallbackToolCalling.enabled": {
 					"type": "boolean",
 					"default": true,
 					"description": "Enable tool calling in fallback chat (@litellm participants)."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.mode": {
+					"type": "string",
+					"default": "auto",
+					"enum": [
+						"auto",
+						"required",
+						"none"
+					],
+					"description": "Fallback tool selection mode: auto (optional tools), required (force one tool call), or none (disable tools)."
+				},
+				"litellm-vscode-chat.fallbackToolCalling.requiredTool": {
+					"type": "string",
+					"default": "execute_command",
+					"description": "Tool name to force when fallbackToolCalling.mode is required."
 				},
 				"litellm-vscode-chat.fallbackToolCalling.requireApprovalForExecution": {
 					"type": "boolean",
@@ -240,10 +318,82 @@
 					"minimum": 500,
 					"description": "Maximum characters of tool execution output to display in chat."
 				},
+				"litellm-vscode-chat.toolLoop.defaultStepCap": {
+					"type": "number",
+					"default": 10,
+					"minimum": 1,
+					"description": "Default maximum number of tool steps per tool loop session. Can be overridden per-session with /tool-loop start --steps N."
+				},
+				"litellm-vscode-chat.toolLoop.defaultRetryLimit": {
+					"type": "number",
+					"default": 3,
+					"minimum": 1,
+					"description": "Default maximum consecutive tool failures before the tool loop stops. Can be overridden per-session with /tool-loop start --retries K."
+				},
+				"litellm-vscode-chat.toolLoop.defaultCheckpointInterval": {
+					"type": "number",
+					"default": 5,
+					"minimum": 0,
+					"description": "Default number of steps between tool loop approval checkpoints. Set to 0 to disable checkpoints. Can be overridden per-session with /tool-loop start --checkpoint M."
+				},
+				"litellm-vscode-chat.fallbackSafety.maxPromptChars": {
+					"type": "number",
+					"default": 24000,
+					"minimum": 4000,
+					"description": "Maximum characters allowed for a packaged fallback prompt after context injection."
+				},
+				"litellm-vscode-chat.fallbackSafety.maxHistoryTurns": {
+					"type": "number",
+					"default": 8,
+					"minimum": 1,
+					"description": "Maximum number of chat history turns included in fallback request packaging."
+				},
+				"litellm-vscode-chat.fallbackSafety.maxResponseBufferChars": {
+					"type": "number",
+					"default": 120000,
+					"minimum": 12000,
+					"description": "Maximum buffered response characters kept while parsing streamed fallback output."
+				},
+				"litellm-vscode-chat.fallbackSafety.maxStreamPartChars": {
+					"type": "number",
+					"default": 12000,
+					"minimum": 1000,
+					"description": "Maximum characters accepted from a single streamed response chunk before clipping."
+				},
+				"litellm-vscode-chat.fallbackSafety.maxLoopStepCapHard": {
+					"type": "number",
+					"default": 50,
+					"minimum": 5,
+					"description": "Hard upper ceiling for fallback tool-loop steps, even when a higher value is requested."
+				},
 				"litellm-vscode-chat.autoApplyCodeEdits": {
 					"type": "boolean",
 					"default": true,
-					"description": "Automatically apply code edits from fallback chat (@litellm) responses. When enabled, code blocks are applied to new untitled editors without requiring manual approval. Use the 'Toggle Auto-Apply Code Edits' command to enable/disable during a session."
+					"description": "Automatically apply code edits from fallback chat (@litellm) responses. When enabled, code blocks are applied to detected target files when possible (or to the active file for a first untargeted block), otherwise to a new untitled editor. Use the 'Toggle Auto-Apply Code Edits' command to enable/disable during a session."
+				},
+				"litellm-vscode-chat.fallbackEditPolicy.pathRequired": {
+					"type": "boolean",
+					"default": false,
+					"description": "Require fallback edits to declare a file path before they can be staged or auto-applied. Untargeted code blocks are skipped when enabled."
+				},
+				"litellm-vscode-chat.fallbackEditPolicy.sameFileOnly": {
+					"type": "boolean",
+					"default": false,
+					"description": "Restrict fallback edits to the current active file only. Structured edits and auto-applied code blocks targeting other files are rejected."
+				},
+				"litellm-vscode-chat.fallbackEditPolicy.workspaceOnly": {
+					"type": "boolean",
+					"default": false,
+					"description": "Block fallback edits that target files outside the current workspace folder."
+				},
+				"litellm-vscode-chat.fallbackEditPolicy.maxFilesPerResponse": {
+					"type": [
+						"number",
+						"null"
+					],
+					"default": null,
+					"minimum": 1,
+					"description": "Maximum number of files a single fallback response may stage or auto-apply. If exceeded, the response's edits are blocked."
 				}
 			}
 		}
