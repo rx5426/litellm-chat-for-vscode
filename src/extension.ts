@@ -992,9 +992,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 
 		const chunks: string[] = [];
-		if (snippetsSections.length > 0) {
-			chunks.push(`Nearby code snippets:\n${snippetsSections.join("\n\n")}`);
-		}
+		chunks.push(`Nearby code snippets:\n${snippetsSections.length > 0 ? snippetsSections.join("\n\n") : "(none)"}`);
 		if (symbolSections.length > 0) {
 			chunks.push(`Symbol context (definitions and references):\n${symbolSections.join("\n\n")}`);
 		}
