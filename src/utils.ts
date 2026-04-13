@@ -1283,11 +1283,52 @@ export async function executeFallbackTool(
 }
 
 function resolveWorkspaceUri(filePath: string): vscode.Uri {
+	const normalizePath = (value: string): string => value.replace(/\\/g, "/").toLowerCase();
+	const mapToWorkspacePath = (inputPath: string): string | undefined => {
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!workspaceRoot) {
+			return undefined;
+		}
+
+		const normalizedInput = normalizePath(inputPath);
+		const normalizedRoot = normalizePath(workspaceRoot);
+		if (normalizedInput === normalizedRoot) {
+			return workspaceRoot;
+		}
+		if (normalizedInput.startsWith(`${normalizedRoot}/`)) {
+			const rawSuffix = inputPath.replace(/\\/g, "/").slice(normalizedRoot.length + 1);
+			const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
+			return suffixParts.length > 0 ? path.join(workspaceRoot, ...suffixParts) : workspaceRoot;
+		}
+
+		const rootParts = normalizedRoot.split("/").filter((part) => part.length > 0);
+		const rootName = rootParts[rootParts.length - 1];
+		if (!rootName) {
+			return undefined;
+		}
+
+		const marker = `/${rootName}/`;
+		const markerIndex = normalizedInput.indexOf(marker);
+		if (markerIndex >= 0) {
+			const rawSuffix = inputPath.replace(/\\/g, "/").slice(markerIndex + marker.length);
+			const suffixParts = rawSuffix.split("/").filter((part) => part.length > 0);
+			return suffixParts.length > 0 ? path.join(workspaceRoot, ...suffixParts) : workspaceRoot;
+		}
+
+		if (normalizedInput.endsWith(`/${rootName}`)) {
+			return workspaceRoot;
+		}
+
+		return undefined;
+	};
+
 	const isAbsolute = filePath.startsWith("/") || /^[a-zA-Z]:/.test(filePath);
 	if (!isAbsolute && vscode.workspace.workspaceFolders?.length) {
 		return vscode.Uri.joinPath(vscode.workspace.workspaceFolders[0].uri, filePath);
 	}
-	return vscode.Uri.file(filePath);
+
+	const mapped = mapToWorkspacePath(filePath);
+	return vscode.Uri.file(mapped ?? filePath);
 }
 
 function workspaceRelativePath(uri: vscode.Uri): string {

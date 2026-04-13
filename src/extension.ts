@@ -830,14 +830,19 @@ export function activate(context: vscode.ExtensionContext) {
 		const queryTokens = tokenizeContextQuery(queryText);
 		const symbolCandidates = extractSymbolCandidates(queryText);
 		const contextPaths = collectEditContextPaths(references, prompt, history);
-		const scored = new Map<string, number>();
+		const scored = new Map<string, { score: number; path: string }>();
 
 		const addScore = (absolutePath: string, score: number) => {
 			if (!absolutePath || score <= 0) {
 				return;
 			}
 			const key = normalizeCandidatePath(absolutePath);
-			scored.set(key, (scored.get(key) ?? 0) + score);
+			const existing = scored.get(key);
+			if (existing) {
+				scored.set(key, { ...existing, score: existing.score + score });
+				return;
+			}
+			scored.set(key, { score, path: absolutePath });
 		};
 
 		if (activeEditorFilePath) {
@@ -878,10 +883,10 @@ export function activate(context: vscode.ExtensionContext) {
 			return undefined;
 		}
 
-		const topPaths = [...scored.entries()]
-			.sort((a, b) => b[1] - a[1])
+		const topPaths = [...scored.values()]
+			.sort((a, b) => b.score - a.score)
 			.slice(0, maxFiles)
-			.map(([key]) => key);
+			.map((entry) => entry.path);
 
 		const snippetsSections: string[] = [];
 		const symbolSections: string[] = [];
