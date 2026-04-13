@@ -1498,6 +1498,7 @@ export function activate(context: vscode.ExtensionContext) {
 		taskPrompt: string;
 		referenceContext?: string;
 		rankedWorkspaceContext?: string;
+		activeEditorFilePath?: string;
 		attachmentContext?: string;
 		attachmentCapabilityMessage?: string;
 		workflowState?: FallbackWorkflowState;
@@ -1505,6 +1506,9 @@ export function activate(context: vscode.ExtensionContext) {
 		editPolicy: FallbackEditPolicy;
 	}): string => {
 		const referencesLines: string[] = [];
+		if (params.activeEditorFilePath) {
+			referencesLines.push(`Active file context: ${makeWorkspaceRelative(params.activeEditorFilePath)}`);
+		}
 		if (params.referenceContext) {
 			referencesLines.push(params.referenceContext);
 		}
@@ -2657,6 +2661,7 @@ export function activate(context: vscode.ExtensionContext) {
 					taskPrompt: effectivePrompt,
 					referenceContext: normalizeReferenceContext(promptWithReferences),
 					rankedWorkspaceContext,
+					activeEditorFilePath,
 					attachmentContext,
 					attachmentCapabilityMessage,
 					workflowState,
