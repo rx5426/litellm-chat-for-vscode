@@ -1510,9 +1510,9 @@ export function activate(context: vscode.ExtensionContext) {
 		if (params.referenceContext) {
 			referencesLines.push(params.referenceContext);
 		}
-		if (params.rankedWorkspaceContext) {
-			referencesLines.push(`Relevant workspace context (ranked):\n${params.rankedWorkspaceContext}`);
-		}
+		referencesLines.push(
+			`Relevant workspace context (ranked):\n${params.rankedWorkspaceContext?.trim() || "(none)"}`
+		);
 		if (params.attachmentContext) {
 			referencesLines.push(params.attachmentContext);
 		}
