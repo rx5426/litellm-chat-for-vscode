@@ -56,6 +56,7 @@ interface FallbackWorkflowState {
 	runtimeTemperature?: number; // Per-session temperature override
 	runtimeMaxTokens?: number; // Per-session max_tokens override
 	runtimeStopSequences?: string[]; // Per-session stop sequence override
+	toolAutoApproveSession?: boolean; // Per-session auto-approve for pending tool calls
 }
 
 interface FallbackWorkflowCheckpoint {
@@ -370,6 +371,8 @@ export function activate(context: vscode.ExtensionContext) {
 				typeof (raw as unknown as Record<string, unknown>).toolLoopConsecutiveFailures === "number"
 					? ((raw as unknown as Record<string, unknown>).toolLoopConsecutiveFailures as number)
 					: undefined,
+			toolAutoApproveSession:
+				(raw as unknown as Record<string, unknown>).toolAutoApproveSession === true ? true : undefined,
 			toolModeOverride:
 				typeof (raw as unknown as Record<string, unknown>).toolModeOverride === "string" &&
 				["auto", "required", "none"].includes(
@@ -424,6 +427,7 @@ export function activate(context: vscode.ExtensionContext) {
 			toolLoopStepsRun: typeof state.toolLoopStepsRun === "number" ? state.toolLoopStepsRun : undefined,
 			toolLoopConsecutiveFailures:
 				typeof state.toolLoopConsecutiveFailures === "number" ? state.toolLoopConsecutiveFailures : undefined,
+			toolAutoApproveSession: state.toolAutoApproveSession === true ? true : undefined,
 			toolModeOverride:
 				state.toolModeOverride === "auto" || state.toolModeOverride === "required" || state.toolModeOverride === "none"
 					? state.toolModeOverride
@@ -1167,7 +1171,9 @@ export function activate(context: vscode.ExtensionContext) {
 	const buildNextStepSuggestions = (state?: FallbackWorkflowState, batch?: FallbackPendingEditBatch): string[] => {
 		const suggestions: string[] = [];
 		if (state?.pendingToolCallId) {
-			suggestions.push("Approve or reject the pending tool call: /tool-approve or /tool-reject");
+			suggestions.push(
+				"Approve or reject the pending tool call: /tool-approve or /tool-reject (or enable /tool-approve-session on)"
+			);
 		}
 		if (batch) {
 			const actionable = batch.edits.filter((edit) => edit.status === "pending" || edit.status === "accepted").length;
@@ -1435,6 +1441,9 @@ export function activate(context: vscode.ExtensionContext) {
 		if (state.loopEnabled) {
 			lines.push(`Approval gate: ${state.pendingApproval ? "waiting" : "ready"}`);
 		}
+		if (state.toolAutoApproveSession === true) {
+			lines.push("Tool auto-approve (session): on");
+		}
 		if (typeof state.runtimeTemperature === "number") {
 			lines.push(`Temperature override: ${state.runtimeTemperature}`);
 		}
@@ -1636,6 +1645,115 @@ export function activate(context: vscode.ExtensionContext) {
 			return undefined;
 		}
 		return state.toolCalls.find((tc) => tc.id === state.pendingToolCallId);
+	};
+
+	const approvePendingToolCallViaCommand = async (): Promise<void> => {
+		const safety = getFallbackSafetyLimits();
+		const pending = getPendingToolCall();
+		if (!pending) {
+			await vscode.window.showInformationMessage("No pending tool call to approve.");
+			return;
+		}
+
+		await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Executing tool: ${pending.name}`,
+			},
+			async () => {
+				try {
+					const result = await executeFallbackTool(pending.name, pending.arguments);
+					const executedAt = Date.now();
+
+					if (result.success) {
+						const clippedOutput = clipTextWithNotice(
+							result.output,
+							safety.maxToolResultChars,
+							"[tool output truncated by safety limit]"
+						).text;
+						await updateToolCall(pending.id, {
+							status: "executed",
+							executedAt,
+							result: clippedOutput,
+							resultMeta: result.meta,
+						});
+
+						const state = getFallbackWorkflowState();
+						if (state) {
+							const exitNote =
+								result.meta?.exitCode !== undefined ? ` (exit code: ${result.meta.exitCode})` : "";
+							const countNote =
+								result.meta?.passed !== undefined || result.meta?.failed !== undefined
+									? ` - ${[
+											result.meta.passed !== undefined ? `${result.meta.passed} passed` : null,
+											result.meta.failed !== undefined ? `${result.meta.failed} failed` : null,
+									  ]
+											.filter(Boolean)
+											.join(", ")}`
+									: "";
+							await saveFallbackWorkflowState({
+								...state,
+								pendingToolCallId: undefined,
+								notes: [...state.notes, `Tool ${pending.name} succeeded${exitNote}${countNote}`],
+							});
+						}
+
+						await vscode.window.showInformationMessage(`Tool executed: ${pending.name}`);
+					} else {
+						void bumpFallbackTelemetry("toolFailures");
+						await updateToolCall(pending.id, {
+							status: "failed",
+							executedAt,
+							error: result.error,
+							resultMeta: result.meta,
+						});
+
+						const exitNote = result.meta?.exitCode !== undefined ? ` (exit code: ${result.meta.exitCode})` : "";
+						const state = getFallbackWorkflowState();
+						if (state) {
+							await saveFallbackWorkflowState({
+								...state,
+								pendingToolCallId: undefined,
+								notes: [...state.notes, `Tool ${pending.name} failed${exitNote}: ${result.error}`],
+							});
+						}
+
+						await vscode.window.showErrorMessage(`Tool failed: ${pending.name}${exitNote} - ${result.error}`);
+					}
+				} catch (error) {
+					const errorMsg = error instanceof Error ? error.message : String(error);
+					void bumpFallbackTelemetry("toolFailures");
+					await updateToolCall(pending.id, {
+						status: "failed",
+						executedAt: Date.now(),
+						error: errorMsg,
+					});
+
+					await vscode.window.showErrorMessage(`Unexpected tool error: ${errorMsg}`);
+				}
+			}
+		);
+	};
+
+	const rejectPendingToolCallViaCommand = async (): Promise<void> => {
+		const pending = getPendingToolCall();
+		if (!pending) {
+			await vscode.window.showInformationMessage("No pending tool call to reject.");
+			return;
+		}
+
+		await updateToolCall(pending.id, { status: "rejected" });
+		void bumpFallbackTelemetry("approvalRejects");
+
+		const state = getFallbackWorkflowState();
+		if (state) {
+			await saveFallbackWorkflowState({
+				...state,
+				pendingToolCallId: undefined,
+			});
+		}
+
+		await vscode.window.showInformationMessage(`Tool call rejected: ${pending.name}`);
 	};
 
 	const handleFallbackWorkflowCommand = async (
@@ -1909,6 +2027,39 @@ export function activate(context: vscode.ExtensionContext) {
 			return { handled: true, metadataMode: "fallback-workflow-command" };
 		}
 
+		if (trimmed.startsWith("/tool-approve-session")) {
+			const rawArgs = trimmed.slice("/tool-approve-session".length).trim().toLowerCase();
+			const existing = getFallbackWorkflowState() ?? emptyState;
+
+			if (!rawArgs || rawArgs === "status") {
+				stream.markdown(
+					`Tool auto-approve (session): **${existing.toolAutoApproveSession === true ? "on" : "off"}**`
+				);
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			if (["on", "enable", "enabled", "true"].includes(rawArgs)) {
+				await saveFallbackWorkflowState({
+					...existing,
+					toolAutoApproveSession: true,
+				});
+				stream.markdown("Enabled session tool auto-approve. Future pending tool calls will auto-execute.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			if (["off", "disable", "disabled", "false"].includes(rawArgs)) {
+				await saveFallbackWorkflowState({
+					...existing,
+					toolAutoApproveSession: undefined,
+				});
+				stream.markdown("Disabled session tool auto-approve.");
+				return { handled: true, metadataMode: "fallback-workflow-command" };
+			}
+
+			stream.markdown("Usage: `/tool-approve-session status|on|off`");
+			return { handled: true, metadataMode: "fallback-workflow-command" };
+		}
+
 		if (trimmed === "/tool-reject") {
 			const pending = getPendingToolCall();
 			if (!pending) {
@@ -2045,7 +2196,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 		if (trimmed === "/help-state") {
 			stream.markdown(
-				"Fallback workflow commands:\n- `/goal <text>` set persistent goal\n- `/note <text>` add persistent note\n- `/show-state` show current goal/notes\n- `/clear-state` clear goal/notes\n- `/loop-start <goal>` start guarded autonomous loop\n- `/loop-step <instruction>` run one loop step\n- `/loop-approve` approve latest checkpoint\n- `/loop-rollback [checkpoint-id|last]` rollback loop state\n- `/loop-status` show loop status\n\nRequest-time controls:\n- `/model status|list|pick|<model-id>` choose fallback model for this session\n- `/temperature status|<0..2>|default` set runtime temperature override\n- `/tokens status|<number>|default` set runtime max_tokens override\n- `/stop status|clear|<seq1>|<seq2>|...` set runtime stop sequences override\n- `/tool-mode status|auto|required [tool-name]|none` set runtime tool mode\n\nTool call commands:\n- `/tool-approve` approve pending tool call\n- `/tool-reject` reject pending tool call\n- `/tool-checkpoint` create checkpoint for executed tools\n- `/tool-status` show tool call statuses\n\nTool loop commands:\n- `/tool-loop start [--steps N] [--retries K] [--checkpoint M] <goal>` start automated tool loop\n- `/tool-loop stop` stop the active tool loop\n- `/tool-loop resume` resume a paused tool loop\n- `/tool-loop status` show tool loop progress"
+				"Fallback workflow commands:\n- `/goal <text>` set persistent goal\n- `/note <text>` add persistent note\n- `/show-state` show current goal/notes\n- `/clear-state` clear goal/notes\n- `/loop-start <goal>` start guarded autonomous loop\n- `/loop-step <instruction>` run one loop step\n- `/loop-approve` approve latest checkpoint\n- `/loop-rollback [checkpoint-id|last]` rollback loop state\n- `/loop-status` show loop status\n\nRequest-time controls:\n- `/model status|list|pick|<model-id>` choose fallback model for this session\n- `/temperature status|<0..2>|default` set runtime temperature override\n- `/tokens status|<number>|default` set runtime max_tokens override\n- `/stop status|clear|<seq1>|<seq2>|...` set runtime stop sequences override\n- `/tool-mode status|auto|required [tool-name]|none` set runtime tool mode\n\nTool call commands:\n- `/tool-approve` approve pending tool call\n- `/tool-reject` reject pending tool call\n- `/tool-approve-session status|on|off` toggle per-session auto-approve\n- `/tool-checkpoint` create checkpoint for executed tools\n- `/tool-status` show tool call statuses\n\nTool loop commands:\n- `/tool-loop start [--steps N] [--retries K] [--checkpoint M] <goal>` start automated tool loop\n- `/tool-loop stop` stop the active tool loop\n- `/tool-loop resume` resume a paused tool loop\n- `/tool-loop status` show tool loop progress"
 			);
 			return { handled: true, metadataMode: "fallback-workflow-command" };
 		}
@@ -3145,22 +3296,34 @@ export function activate(context: vscode.ExtensionContext) {
 					} else {
 						// === MANUAL MODE: Save tool call and wait for user approval ===
 						await addToolCall(pendingToolCall);
+						const workflowState = getFallbackWorkflowState();
+						if (workflowState?.toolAutoApproveSession === true) {
+							stream.markdown(
+								"\nSession auto-approve is enabled (`/tool-approve-session on`), so this tool call will execute automatically."
+							);
+							await approvePendingToolCallViaCommand();
+						} else {
+							// Show approval action buttons
+							stream.button({
+								title: "/tool-approve",
+								command: "litellm.approvePendingToolCall",
+								arguments: [],
+							});
+							stream.button({
+								title: "/tool-reject",
+								command: "litellm.rejectPendingToolCall",
+								arguments: [],
+							});
+							stream.button({
+								title: "/tool-approve-session on",
+								command: "litellm.enableSessionToolAutoApprove",
+								arguments: [],
+							});
 
-						// Show approval action buttons
-						stream.button({
-							title: "✓ Approve Tool",
-							command: "vscode.chat.openSymbolFromResult",
-							arguments: [],
-						});
-						stream.button({
-							title: "✗ Reject Tool",
-							command: "vscode.chat.openSymbolFromResult",
-							arguments: [],
-						});
-
-						stream.markdown(
-							"\n**Next step:** Type `/tool-approve` to execute the tool request, or `/tool-reject` to skip it."
-						);
+							stream.markdown(
+								"\n**Next step:** Type `/tool-approve` to execute, `/tool-reject` to skip, or `/tool-approve-session on` to auto-approve for this session."
+							);
+						}
 					}
 				}
 
@@ -3805,6 +3968,36 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 
 	// Management command to configure base URL and API key
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.approvePendingToolCall", async () => {
+			await approvePendingToolCallViaCommand();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.rejectPendingToolCall", async () => {
+			await rejectPendingToolCallViaCommand();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.enableSessionToolAutoApprove", async () => {
+			const existing = getFallbackWorkflowState() ?? {
+				notes: [],
+				loopEnabled: false,
+				pendingApproval: false,
+				checkpoints: [],
+				toolCalls: [],
+				updatedAt: Date.now(),
+			};
+			await saveFallbackWorkflowState({
+				...existing,
+				toolAutoApproveSession: true,
+			});
+			await vscode.window.showInformationMessage("Enabled tool auto-approve for this session.");
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand("litellm.manage", async () => {
 			// First, prompt for base URL

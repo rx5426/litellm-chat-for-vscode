@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
 	},
-	"version": "0.1.38",
+	"version": "0.1.39",
 	"engines": {
 		"vscode": "^1.103.0"
 	},
@@ -120,6 +120,18 @@
 			{
 				"command": "litellm.toggleAutoApplyCodeEdits",
 				"title": "LiteLLM: Toggle Auto-Apply Code Edits (Fallback Chat)"
+			},
+			{
+				"command": "litellm.approvePendingToolCall",
+				"title": "LiteLLM: Approve Pending Tool Call (Fallback Chat)"
+			},
+			{
+				"command": "litellm.rejectPendingToolCall",
+				"title": "LiteLLM: Reject Pending Tool Call (Fallback Chat)"
+			},
+			{
+				"command": "litellm.enableSessionToolAutoApprove",
+				"title": "LiteLLM: Enable Session Tool Auto-Approve (Fallback Chat)"
 			},
 			{
 				"command": "litellm.approveFallbackToolCall",
