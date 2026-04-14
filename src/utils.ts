@@ -1483,7 +1483,7 @@ async function executeFallbackSearchFiles(args: Record<string, unknown>): Promis
 			output: uris.map((uri) => workspaceRelativePath(uri)).join("\n") || "(no matches)",
 			meta: { tool: "search_files", lineCount: uris.length },
 		};
-	} catch (error) {
+	} catch {
 		return {
 			success: true,
 			output: "(no matches)",
