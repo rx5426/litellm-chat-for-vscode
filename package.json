@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/rx5426/litellm-chat-for-vscode"
 	},
-	"version": "0.1.40",
+	"version": "0.1.41",
 	"engines": {
 		"vscode": "^1.103.0"
 	},
@@ -156,6 +156,30 @@
 			{
 				"command": "litellm.discardStagedEdits",
 				"title": "LiteLLM: Discard Staged Edits (Fallback Chat)"
+			},
+			{
+				"command": "litellm.enhancedChat.toggleThinking",
+				"title": "LiteLLM: Toggle Thinking Blocks"
+			},
+			{
+				"command": "litellm.enhancedChat.approveTool",
+				"title": "LiteLLM: Approve Tool Execution"
+			},
+			{
+				"command": "litellm.enhancedChat.rejectTool",
+				"title": "LiteLLM: Reject Tool Execution"
+			},
+			{
+				"command": "litellm.fallback.setupTests",
+				"title": "LiteLLM: Fallback Setup Tests"
+			},
+			{
+				"command": "litellm.fallback.searchTestExtensions",
+				"title": "LiteLLM: Search Testing Extensions"
+			},
+			{
+				"command": "litellm.fallback.dismissSetupSuggestion",
+				"title": "LiteLLM: Dismiss Fallback Setup Suggestion"
 			}
 		],
 		"configuration": {
@@ -406,6 +430,41 @@
 					"default": null,
 					"minimum": 1,
 					"description": "Maximum number of files a single fallback response may stage or auto-apply. If exceeded, the response's edits are blocked."
+				},
+				"litellm-vscode-chat.showThinkingBlocks": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show AI reasoning in collapsible thinking blocks"
+				},
+				"litellm-vscode-chat.enableCodeBlockExtraction": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically extract and enhance code blocks"
+				},
+				"litellm-vscode-chat.showFileTreeForEdits": {
+					"type": "boolean",
+					"default": true,
+					"description": "Visualize multi-file edits with file tree"
+				},
+				"litellm-vscode-chat.toolApprovalRequired": {
+					"type": "boolean",
+					"default": false,
+					"description": "Require user approval before executing tools"
+				},
+				"litellm-vscode-chat.streamingToolArguments": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show tool arguments as they stream from model"
+				},
+				"litellm-vscode-chat.showProgressIndicators": {
+					"type": "boolean",
+					"default": true,
+					"description": "Display progress indicators during operations"
+				},
+				"litellm-vscode-chat.automatedSetupSuggestions.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable Copilot-style automated setup suggestions in fallback chat for missing test frameworks/extensions."
 				}
 			}
 		}

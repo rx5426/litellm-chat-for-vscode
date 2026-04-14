@@ -13,12 +13,24 @@ import {
 } from "./utils";
 import type { FallbackToolResultMeta } from "./utils";
 
+// NEW: Integration adapter and enhanced components
+import { FallbackChatStreamAdapter, getEnhancedChatConfig } from "./integration-adapter";
+import { extractCodeBlocksFromMarkdown, enrichCodeBlocksWithMetadata } from "./code-block-processor";
+import {
+	computeFallbackSetupSuggestion,
+	formatFallbackSetupSuggestionMarkdown,
+	openTestingExtensionsSearch,
+	runAutomatedTestSetup,
+} from "./fallback-automation";
+
 const LITELLM_VENDOR = "litellm";
 const LITELLM_CHAT_PARTICIPANT_ID = "rx5426.litellm-chat";
 const LITELLM_SELECTED_CHAT_MODEL_KEY = "litellm.selectedChatModel";
 const LITELLM_FALLBACK_WORKFLOW_STATE_KEY = "litellm.fallbackWorkflowState";
 const LITELLM_PENDING_EDIT_BATCH_STATE_KEY = "litellm.pendingEditBatch";
 const LITELLM_FALLBACK_TELEMETRY_KEY = "litellm.fallbackTelemetry";
+const LITELLM_FALLBACK_SETUP_SUGGESTION_SEEN_KEY = "litellm.fallbackSetupSuggestionSeen";
+const LITELLM_FALLBACK_SETUP_SUGGESTION_LAST_SHOWN_KEY = "litellm.fallbackSetupSuggestionLastShown";
 
 interface FallbackToolCall {
 	id: string;
@@ -2729,10 +2741,26 @@ export function activate(context: vscode.ExtensionContext) {
 		];
 	};
 
+	/**
+	 * Create a new enhanced stream adapter for fallback chat.
+	 * Wraps VS Code's ChatResponseStream with our enhanced streaming architecture.
+	 */
+	function createEnhancedStreamAdapter(
+		vscodeStream: vscode.ChatResponseStream,
+		workspaceFolder?: vscode.WorkspaceFolder
+	): FallbackChatStreamAdapter {
+		const config = getEnhancedChatConfig();
+		return new FallbackChatStreamAdapter(vscodeStream, config, workspaceFolder);
+	}
+
 	const fallbackParticipant = vscode.chat.createChatParticipant(
 		LITELLM_CHAT_PARTICIPANT_ID,
 		async (request, chatContext, stream, token) => {
 			try {
+				// NEW: Create enhanced stream adapter
+				const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+				const enhancedAdapter = createEnhancedStreamAdapter(stream, workspaceFolder);
+
 				const workflowCommand = await handleFallbackWorkflowCommand(request.prompt, stream);
 				if (workflowCommand.handled && !workflowCommand.promptOverride) {
 					return {
@@ -2743,7 +2771,25 @@ export function activate(context: vscode.ExtensionContext) {
 				}
 
 				const effectivePrompt = workflowCommand.promptOverride ?? request.prompt;
+				const setupSuggestionSeen = context.globalState.get<boolean>(LITELLM_FALLBACK_SETUP_SUGGESTION_SEEN_KEY, false);
+				const setupSuggestion = await computeFallbackSetupSuggestion(
+					effectivePrompt,
+					workspaceFolder,
+					setupSuggestionSeen
+				);
 				const safety = getFallbackSafetyLimits();
+				enhancedAdapter.emitThinking(
+					"Analyzing the request, active workspace context, and fallback workflow state before contacting the selected model."
+				);
+				enhancedAdapter.emitProgressSteps([
+					{ title: "Resolve model", description: "Select fallback model and runtime options", status: "in-progress" },
+					{
+						title: "Collect context",
+						description: "Gather references, history, and workspace signals",
+						status: "pending",
+					},
+					{ title: "Stream response", description: "Handle markdown, tools, and edits", status: "pending" },
+				]);
 
 				stream.progress("Resolving fallback model and runtime controls...");
 				const selectedModel = await selectLiteLLMChatModel(true);
@@ -2870,12 +2916,11 @@ export function activate(context: vscode.ExtensionContext) {
 									safety.maxStreamPartChars,
 									"[response chunk truncated by safety limit]"
 								).text;
-								stream.markdown(text);
+								enhancedAdapter.emitMarkdown(text);
 								streamedTextBuffer += text;
 								if (streamedTextBuffer.length > safety.maxResponseBufferChars) {
 									streamedTextBuffer = streamedTextBuffer.slice(-safety.maxResponseBufferChars);
 								}
-
 								// Parse accumulated content so fenced blocks split across streaming chunks are detected.
 								const detectedBlocks = extractCodeBlocks(streamedTextBuffer);
 								const blocks = detectedBlocks.filter((block) => {
@@ -2886,6 +2931,15 @@ export function activate(context: vscode.ExtensionContext) {
 									emittedCodeBlocks.add(fingerprint);
 									return true;
 								});
+
+								// NEW: Enhanced code block extraction with metadata (optional, non-blocking)
+								// TODO: Fix type compatibility issues with parseCodeBlock types
+								/*if (blocks.length > 0 && getEnhancedChatConfig().enableCodeBlockExtraction) {
+									// Note: enrichCodeBlocksWithMetadata is async but we don't await to avoid blocking streaming
+									enrichCodeBlocksWithMetadata(blocks, workspaceFolder).catch((error) => {
+										console.error("Error enriching code blocks:", error);
+									});
+								}*/
 
 								if (blocks.length > 0 && autoApplyEdits) {
 									stream.progress(`Auto-applying ${blocks.length} new code block${blocks.length > 1 ? "s" : ""}...`);
@@ -2985,13 +3039,20 @@ export function activate(context: vscode.ExtensionContext) {
 									createdAt: Date.now(),
 								};
 
+								// NEW: Use enhanced adapter for tool tracking
+								const toolInput = (typeof part.input === "object" && part.input !== null ? part.input : {}) as Record<
+									string,
+									unknown
+								>;
+								enhancedAdapter.beginToolCall(part.name, pendingToolCall.id, toolInput);
+
 								// Display tool call — in loop mode we auto-execute, in manual mode we wait for approval
 								const toolLoopIsActive = getFallbackWorkflowState()?.toolLoopActive === true;
-								stream.markdown(
+								enhancedAdapter.emitMarkdown(
 									`\n🔧 **Tool call${toolLoopIsActive ? " (auto-executing)" : " requested"}**: \`${part.name}\`\n\`\`\`json\n${JSON.stringify(part.input ?? {}, null, 2)}\n\`\`\``
 								);
 								if (!toolLoopIsActive) {
-									stream.markdown(
+									enhancedAdapter.emitMarkdown(
 										"Use `/tool-approve` to execute this tool or `/tool-reject` to skip it. Waiting for your decision..."
 									);
 								}
@@ -3000,6 +3061,16 @@ export function activate(context: vscode.ExtensionContext) {
 					},
 					token
 				);
+
+				if (getEnhancedChatConfig().enableCodeBlockExtraction && streamedTextBuffer.trim().length > 0) {
+					const extractedBlocks = await extractCodeBlocksFromMarkdown(streamedTextBuffer, workspaceFolder);
+					if (extractedBlocks.length > 0) {
+						const enrichedCodeBlocks = await enrichCodeBlocksWithMetadata(extractedBlocks, workspaceFolder);
+						for (const codeBlock of enrichedCodeBlocks.slice(0, 6)) {
+							enhancedAdapter.emitCodeBlock(codeBlock);
+						}
+					}
+				}
 
 				const rawStructuredEdits = extractStructuredEdits(streamedTextBuffer).filter((edit) => Boolean(edit.content));
 				if (rawStructuredEdits.length > 0) {
@@ -3064,6 +3135,13 @@ export function activate(context: vscode.ExtensionContext) {
 						}),
 					};
 					await savePendingEditBatch(batch);
+					enhancedAdapter.emitFileTree(
+						batch.edits.map((edit) => ({
+							path: edit.path,
+							isNew: edit.intent === "create",
+							description: edit.description,
+						}))
+					);
 					stream.progress(
 						`Staged ${batch.edits.length} structured edit${batch.edits.length === 1 ? "" : "s"}. Use /edit-status for details and next actions.`
 					);
@@ -3125,6 +3203,9 @@ export function activate(context: vscode.ExtensionContext) {
 							const tcArgs = currentToolCall.arguments;
 
 							try {
+								// NEW: Use enhanced tool tracking
+								enhancedAdapter.markToolExecuting(tcId);
+
 								const result = await executeFallbackTool(tcName, tcArgs);
 								if (result.success) {
 									const clippedOutput = clipTextWithNotice(
@@ -3132,6 +3213,10 @@ export function activate(context: vscode.ExtensionContext) {
 										safety.maxToolResultChars,
 										"[tool output truncated by safety limit]"
 									).text;
+
+									// NEW: Track in adapter
+
+									enhancedAdapter.markToolCompleted(tcId);
 									await updateToolCall(tcId, {
 										status: "executed",
 										executedAt,
@@ -3144,7 +3229,7 @@ export function activate(context: vscode.ExtensionContext) {
 										safety.maxToolResultChars,
 										"[formatted tool output truncated by safety limit]"
 									).text;
-									stream.markdown(
+									enhancedAdapter.emitMarkdown(
 										`\n✓ **[Loop ${stepsRun}/${stepCap}]** \`${tcName}\`\n\`\`\`\n${toolResultText}\n\`\`\``
 									);
 								} else {
@@ -3158,11 +3243,14 @@ export function activate(context: vscode.ExtensionContext) {
 									consecutiveFailures++;
 									toolResultText = `Error: ${result.error ?? "(unknown)"}`;
 									const exitNote = result.meta?.exitCode !== undefined ? ` (exit code: ${result.meta.exitCode})` : "";
-									stream.markdown(`\n✗ **[Loop ${stepsRun}/${stepCap}]** \`${tcName}\`${exitNote}: ${result.error}`);
+									enhancedAdapter.emitMarkdown(
+										`\n✗ **[Loop ${stepsRun}/${stepCap}]** \`${tcName}\`${exitNote}: ${result.error}`
+									);
 								}
 							} catch (toolError) {
 								const errMsg = toolError instanceof Error ? toolError.message : String(toolError);
 								void bumpFallbackTelemetry("toolFailures");
+								enhancedAdapter.markToolFailed(tcId, errMsg);
 								await updateToolCall(tcId, {
 									status: "failed",
 									executedAt: Date.now(),
@@ -3225,7 +3313,7 @@ export function activate(context: vscode.ExtensionContext) {
 												safety.maxStreamPartChars,
 												"[response chunk truncated by safety limit]"
 											).text;
-											stream.markdown(safeChunk);
+											enhancedAdapter.emitMarkdown(safeChunk);
 											streamedTextBuffer += safeChunk;
 											if (streamedTextBuffer.length > safety.maxResponseBufferChars) {
 												streamedTextBuffer = streamedTextBuffer.slice(-safety.maxResponseBufferChars);
@@ -3241,7 +3329,7 @@ export function activate(context: vscode.ExtensionContext) {
 												status: "pending",
 												createdAt: Date.now(),
 											};
-											stream.markdown(
+											enhancedAdapter.emitMarkdown(
 												`\n🔧 **Tool call (auto-executing)**: \`${part.name}\`\n\`\`\`json\n${JSON.stringify(part.input ?? {}, null, 2)}\n\`\`\``
 											);
 										}
@@ -3317,7 +3405,7 @@ export function activate(context: vscode.ExtensionContext) {
 								arguments: [],
 							});
 
-							stream.markdown(
+							enhancedAdapter.emitMarkdown(
 								"\n**Next step:** Type `/tool-approve` to execute, `/tool-reject` to skip, or `/tool-approve-session on` to auto-approve for this session."
 							);
 						}
@@ -3357,12 +3445,53 @@ export function activate(context: vscode.ExtensionContext) {
 				const finalBatch = getPendingEditBatch();
 				const nextSteps = buildNextStepSuggestions(finalState, finalBatch);
 				stream.progress(`Request complete. ${summarizePendingEditBatch(finalBatch)}`);
-				stream.markdown(
+				enhancedAdapter.emitProgressSteps([
+					{ title: "Resolve model", description: "Fallback model selected", status: "complete" },
+					{ title: "Collect context", description: "References and workflow state packaged", status: "complete" },
+					{
+						title: "Stream response",
+						description: finalBatch
+							? `Completed with ${finalBatch.edits.length} staged edits`
+							: "Completed without staged edits",
+						status: "complete",
+					},
+				]);
+				enhancedAdapter.emitMarkdown(
 					`\n**Suggested next actions:**\n${nextSteps
 						.slice(0, 3)
 						.map((item) => `- ${item}`)
 						.join("\n")}`
 				);
+
+				if (setupSuggestion) {
+					enhancedAdapter.emitQuestionCarousel("Setup actions", [
+						{ label: "Run automated setup", description: "Install and configure testing defaults" },
+						{ label: "Search extensions", description: "Find language-specific testing extension support" },
+						{ label: "Dismiss reminder", description: "Hide this suggestion for now" },
+					]);
+					enhancedAdapter.emitMarkdown(`\n${formatFallbackSetupSuggestionMarkdown(setupSuggestion)}`);
+					if (setupSuggestion.kind === "setup-tests") {
+						stream.button({
+							title: "Run Automated Test Setup",
+							command: "litellm.fallback.setupTests",
+							arguments: [],
+						});
+					}
+					if (setupSuggestion.kind === "install-extension" || setupSuggestion.kind === "search-extensions") {
+						stream.button({
+							title: "Search Testing Extensions",
+							command: "litellm.fallback.searchTestExtensions",
+							arguments: [setupSuggestion.recommendedExtensionName ?? "testing framework"],
+						});
+					}
+					stream.button({
+						title: "Dismiss Setup Reminder",
+						command: "litellm.fallback.dismissSetupSuggestion",
+						arguments: [],
+					});
+					await context.globalState.update(LITELLM_FALLBACK_SETUP_SUGGESTION_SEEN_KEY, true);
+					await context.globalState.update(LITELLM_FALLBACK_SETUP_SUGGESTION_LAST_SHOWN_KEY, Date.now());
+				}
 
 				return {
 					metadata: {
@@ -4224,6 +4353,59 @@ export function activate(context: vscode.ExtensionContext) {
 					}
 				});
 			}
+		})
+	);
+
+	// NEW: Enhanced chat feature commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.enhancedChat.toggleThinking", async () => {
+			const config = vscode.workspace.getConfiguration("litellm-vscode-chat");
+			const current = config.get<boolean>("showThinkingBlocks", true);
+			await config.update("showThinkingBlocks", !current);
+			vscode.window.showInformationMessage(`Thinking blocks ${!current ? "enabled" : "disabled"}`);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.enhancedChat.approveTool", async (toolCallId: string) => {
+			await approvePendingToolCallViaCommand();
+			if (toolCallId) {
+				vscode.window.showInformationMessage(`Approved tool: ${toolCallId}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.enhancedChat.rejectTool", async (toolCallId: string) => {
+			await rejectPendingToolCallViaCommand();
+			if (toolCallId) {
+				vscode.window.showWarningMessage(`Rejected tool: ${toolCallId}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.fallback.setupTests", async () => {
+			const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+			const result = await runAutomatedTestSetup(workspaceFolder);
+			if (!result.started) {
+				await vscode.window.showWarningMessage(result.reason ?? "Unable to start automated test setup.");
+				return;
+			}
+			await vscode.window.showInformationMessage("Started automated test setup in terminal.");
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.fallback.searchTestExtensions", async (query?: string) => {
+			await openTestingExtensionsSearch(typeof query === "string" ? query : undefined);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("litellm.fallback.dismissSetupSuggestion", async () => {
+			await context.globalState.update(LITELLM_FALLBACK_SETUP_SUGGESTION_LAST_SHOWN_KEY, Date.now());
+			await vscode.window.showInformationMessage("Fallback setup reminder dismissed.");
 		})
 	);
 
