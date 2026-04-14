@@ -1680,14 +1680,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 						const state = getFallbackWorkflowState();
 						if (state) {
-							const exitNote =
-								result.meta?.exitCode !== undefined ? ` (exit code: ${result.meta.exitCode})` : "";
+							const exitNote = result.meta?.exitCode !== undefined ? ` (exit code: ${result.meta.exitCode})` : "";
 							const countNote =
 								result.meta?.passed !== undefined || result.meta?.failed !== undefined
 									? ` - ${[
 											result.meta.passed !== undefined ? `${result.meta.passed} passed` : null,
 											result.meta.failed !== undefined ? `${result.meta.failed} failed` : null,
-									  ]
+										]
 											.filter(Boolean)
 											.join(", ")}`
 									: "";
@@ -2032,9 +2031,7 @@ export function activate(context: vscode.ExtensionContext) {
 			const existing = getFallbackWorkflowState() ?? emptyState;
 
 			if (!rawArgs || rawArgs === "status") {
-				stream.markdown(
-					`Tool auto-approve (session): **${existing.toolAutoApproveSession === true ? "on" : "off"}**`
-				);
+				stream.markdown(`Tool auto-approve (session): **${existing.toolAutoApproveSession === true ? "on" : "off"}**`);
 				return { handled: true, metadataMode: "fallback-workflow-command" };
 			}
 
